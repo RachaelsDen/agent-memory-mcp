@@ -1,0 +1,19 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_USER: agent_memory
+      POSTGRES_PASSWORD: agent_memory
+      POSTGRES_DB: agent_memory
+    volumes:
+      - agent_memory_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_memory"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  agent_memory_pgdata:
