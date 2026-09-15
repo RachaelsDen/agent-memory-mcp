@@ -24,6 +24,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 
 from agent_memory import db
 from agent_memory.config import get_settings
+from agent_memory.consolidation_tools import consolidate_scan
 from agent_memory.embed import load_embedder
 from agent_memory.retrieval import run_retrieval
 from agent_memory.usage import report_usage
@@ -149,6 +150,31 @@ def create_server() -> MCPServer:
         """Explicit recall ("what do we know about X"); same shape as probe."""
         return run_retrieval(
             get_settings(), tool="search", query_text=query, k=k, namespace=namespace
+        )
+
+    @server.tool()
+    def memory_consolidate_scan(
+        pool: str = "fresh",
+        min_cluster_size: int = 2,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Scan for consolidation candidates (DESIGN §8 step 1; read-only).
+
+        Age-eligible episodes (older than CONSOLIDATE_MIN_AGE_H) cluster
+        greedily by embedding cosine > CLUSTER_COS with the earliest episode
+        seeding; only clusters with min_cluster_size or more members return,
+        each episode with full fields plus its citing lessons. pool='fresh'
+        (default) limits to never-cited backlog episodes; pool='all'
+        includes cited ones for abstraction passes. Every PENDING disputed
+        lesson additionally returns a rederivation group holding ALL its
+        source episodes regardless of pool, min_cluster_size, or age — the
+        host re-derives it via memory_write_lesson with replaces_disputed.
+        """
+        return consolidate_scan(
+            get_settings(),
+            pool=pool,
+            min_cluster_size=min_cluster_size,
+            namespace=namespace,
         )
 
     @server.tool()
