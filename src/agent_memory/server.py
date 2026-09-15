@@ -25,6 +25,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 from agent_memory import db
 from agent_memory.config import get_settings
 from agent_memory.embed import load_embedder
+from agent_memory.retrieval import run_retrieval
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
@@ -117,6 +118,37 @@ def create_server() -> MCPServer:
             connection.close()
         assert row is not None  # INSERT ... RETURNING always yields exactly one row
         return {"id": row["id"]}
+
+    @server.tool()
+    def memory_probe(
+        current_goal: str,
+        approach: str = "",
+        k: int | None = None,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Recall memories relevant to what the agent is about to do (P7).
+
+        The query is the agent's current intent (goal + approach), not the
+        user's words: hybrid keyword+vector RRF ranking, one hop of spreading
+        activation over lesson_links, exposure logged to retrieval_events.
+        """
+
+        return run_retrieval(
+            get_settings(),
+            tool="probe",
+            query_text=current_goal + " " + approach,
+            k=k,
+            namespace=namespace,
+        )
+
+    @server.tool()
+    def memory_search(
+        query: str, k: int | None = None, namespace: str | None = None
+    ) -> dict[str, Any]:
+        """Explicit recall ("what do we know about X"); same shape as probe."""
+        return run_retrieval(
+            get_settings(), tool="search", query_text=query, k=k, namespace=namespace
+        )
 
     return server
 

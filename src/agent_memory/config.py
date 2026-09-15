@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     TAU_USE_H: int = 720
     SIM_FLOOR: float = 0.25
     TS_RANK_SAT: float = 0.1
+    STALE_ENV_FRESH: float = 0.2
+    SALIENCE_STALE: float = 0.7
     DIGEST_DIR: str = "~/.agent-memory/digest"  # expanduser at use time
     PROBE_TOPK: int = 12
     FINAL_K: int = 8
