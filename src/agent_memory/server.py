@@ -5,6 +5,9 @@ turns that into ``CallToolResult(isError=True)``; a failed call NEVER exits
 the process, so the same session keeps serving subsequent requests. Captured
 text is screened for credential-like content (DESIGN §11) and rejected with
 an error naming the FIELD only — the matched content is never echoed back.
+
+SIZE_OK by plan contract: every plan tool registers on this one app, so the
+file grows by one thin wrapper per task; logic lives in the tool modules.
 """
 
 import re
@@ -24,7 +27,12 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 
 from agent_memory import db
 from agent_memory.config import get_settings
-from agent_memory.consolidation_tools import consolidate_scan, write_lesson
+from agent_memory.consolidation_tools import (
+    consolidate_scan,
+    corroborate,
+    contradict,
+    write_lesson,
+)
 from agent_memory.embed import load_embedder
 from agent_memory.retrieval import run_retrieval
 from agent_memory.usage import report_usage
@@ -213,6 +221,50 @@ def create_server() -> MCPServer:
             contradicts=contradicts,
             replaces_disputed=replaces_disputed,
             namespace=namespace,
+        )
+
+    @server.tool()
+    def memory_corroborate(
+        lesson_id: int,
+        episode_id: int,
+        reason: str = "",
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one episode as further support for a lesson (DESIGN §6, §8 step 4).
+
+        Inserts (or flips to) a support evidence edge and moves confidence
+        +0.1 x novelty — novelty 1.0 on a new UTC date with a non-duplicate
+        embedding vs the lesson's existing support evidence, 0.3 for a
+        near-duplicate — capped at 0.95. An edge already in relation support
+        is a no-op writing nothing. last_evidence_at refreshes to
+        max(current, episode.created_at). namespace is accepted per the
+        every-tool contract; the ids alone scope the move. Returns
+        {"lesson_id", "episode_id", "relation", "confidence", "applied"}.
+        """
+        return corroborate(
+            get_settings(), lesson_id=lesson_id, episode_id=episode_id, reason=reason
+        )
+
+    @server.tool()
+    def memory_contradict(
+        lesson_id: int,
+        episode_id: int,
+        reason: str = "",
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one episode as contradicting a lesson (DESIGN §6, §8 step 4).
+
+        Inserts (or flips to) a contradict evidence edge and moves confidence
+        -0.2 flat, floored at 0.05. An edge already in relation contradict is
+        a no-op writing nothing — a retried contradiction never
+        double-penalizes. No lesson-lesson contradicts links are written;
+        write_lesson's contradicts param owns those. last_evidence_at
+        refreshes to max(current, episode.created_at). namespace is accepted
+        per the every-tool contract; the ids alone scope the move. Returns
+        {"lesson_id", "episode_id", "relation", "confidence", "applied"}.
+        """
+        return contradict(
+            get_settings(), lesson_id=lesson_id, episode_id=episode_id, reason=reason
         )
 
     @server.tool()

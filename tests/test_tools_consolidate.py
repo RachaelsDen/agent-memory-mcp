@@ -1147,3 +1147,618 @@ class TestConcurrentWriteLesson:
 
 
 # === Task 11 marker: memory_corroborate / memory_contradict append here ===
+
+# === Task 11 section: memory_corroborate / memory_contradict ================
+# Evidence moves per DESIGN §6 (+0.1 x novelty / -0.2 flat, cap 0.95, floor
+# 0.05) and the review-hardened transition table. Adversarial classes:
+# flaky_tests — barrier-sync threads + absolute backdate(at=) dates, never
+# wall-clock reads; misleading_success_output — every move cross-checked via
+# SQL on confidence/edges/last_evidence_at/updated_at; stale_state — per-test
+# truncate in conftest; hung_commands — --durations=10 in the tee'd evidence
+# runs; scope_drift / sloppy_patching / fake_data_bypass /
+# verification_by_vibes — n/a (real stdio server, real Postgres, no mocks).
+#
+# Seed discipline: lessons come from write_lesson (the REAL path). The 0.50
+# seed composition is the task-10 golden — episodes A,B = same-day near-dup
+# pair (V_X, day1 12:00/13:00 -> one incident), C = distinct day (V_Y, day3);
+# incidents=2, occasions={day1, day3} -> 0.35 + 0.05 + 0.20*0.5 = 0.50 EXACT.
+# Novel corroboration episodes sit on UTC dates distinct from EVERY existing
+# support episode's date AND carry vectors orthogonal (cos exactly 0.0) to all
+# of them — novelty 1.0 by construction, deterministic against DB now().
+
+SEED_CLAIM = "backoff pacing holds under load"
+SEED_BECAUSE = "sync retries amplify packet storms"
+
+# mutually-orthogonal novel-episode vectors (dims 4-8; V_X/V_Y own dims 1-2)
+V_N1 = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+V_N2 = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+V_N3 = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+V_N4 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+V_N5 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+DAY = timedelta(days=1)
+DAY_1 = T_BASE                 # seed near-dup date
+DAY_2 = T_BASE + DAY           # between the seed dates (max() no-rewind)
+DAY_3 = T_BASE + 2 * DAY       # seed distinct-day date
+NOVEL_DAY = T_BASE + 10 * DAY  # first corroboration date (fresh UTC date)
+
+SEED_OVERRIDES = {_lesson_text(SEED_CLAIM, SEED_BECAUSE, ""): V_Z}
+
+
+def _seed_overrides() -> dict[str, list[float]]:
+    """Override channel for the shared 0.50 seed lesson (write_lesson embed)."""
+    return dict(SEED_OVERRIDES)
+
+
+async def _seed_half_confidence_lesson(
+    db: psycopg.Connection[DictRow], session: ClientSession
+) -> tuple[int, int, int, int]:
+    """write_lesson (REAL path) -> confidence exactly 0.50 over 3 support edges.
+
+    Returns (lesson_id, ep_a, ep_b, ep_c); last_evidence_at lands on DAY_3.
+    """
+    ep_a = _insert_episode(db, goal="seed near-dup one", embedding=V_X)
+    ep_b = _insert_episode(db, goal="seed near-dup two", embedding=V_X)
+    ep_c = _insert_episode(db, goal="seed distinct day", embedding=V_Y)
+    backdate("episodes", ep_a, at=DAY_1)
+    backdate("episodes", ep_b, at=DAY_1 + timedelta(hours=1))
+    backdate("episodes", ep_c, at=DAY_3)
+    payload = _ok(
+        await _write(
+            session,
+            claim=SEED_CLAIM,
+            because=SEED_BECAUSE,
+            evidence=[
+                {"episode_id": ep_a, "relation": "support"},
+                {"episode_id": ep_b, "relation": "support"},
+                {"episode_id": ep_c, "relation": "support"},
+            ],
+        )
+    )
+    assert payload["seed_confidence"] == pytest.approx(0.50)
+    return int(payload["lesson_id"]), ep_a, ep_b, ep_c
+
+
+async def _seed_refine_edge_lesson(
+    db: psycopg.Connection[DictRow], session: ClientSession
+) -> tuple[int, int, int]:
+    """write_lesson (REAL path) with a refine edge: A support day1 + R refine day3.
+
+    Same seed math (incidents 2, occasions {day1, day3}) -> 0.50. Returns
+    (lesson_id, ep_a, ep_r); the (lesson, ep_r) edge is relation 'refine'.
+    """
+    ep_a = _insert_episode(db, goal="refine seed support", embedding=V_X)
+    ep_r = _insert_episode(db, goal="refine seed refinement", embedding=V_Y)
+    backdate("episodes", ep_a, at=DAY_1)
+    backdate("episodes", ep_r, at=DAY_3)
+    payload = _ok(
+        await _write(
+            session,
+            claim=SEED_CLAIM,
+            because=SEED_BECAUSE,
+            evidence=[
+                {"episode_id": ep_a, "relation": "support"},
+                {"episode_id": ep_r, "relation": "refine", "reason": "boundary case"},
+            ],
+        )
+    )
+    assert payload["seed_confidence"] == pytest.approx(0.50)
+    return int(payload["lesson_id"]), ep_a, ep_r
+
+
+async def _corroborate(
+    session: ClientSession, lesson_id: int, episode_id: int, reason: str = ""
+) -> dict[str, Any]:
+    result = _ok(
+        await session.call_tool(
+            "memory_corroborate",
+            {"lesson_id": lesson_id, "episode_id": episode_id, "reason": reason},
+        )
+    )
+    assert result["lesson_id"] == lesson_id
+    assert result["episode_id"] == episode_id
+    return result
+
+
+async def _contradict(
+    session: ClientSession, lesson_id: int, episode_id: int, reason: str = ""
+) -> dict[str, Any]:
+    result = _ok(
+        await session.call_tool(
+            "memory_contradict",
+            {"lesson_id": lesson_id, "episode_id": episode_id, "reason": reason},
+        )
+    )
+    assert result["lesson_id"] == lesson_id
+    assert result["episode_id"] == episode_id
+    return result
+
+
+def _lesson_state(
+    db: psycopg.Connection[DictRow], lesson_id: int
+) -> dict[str, Any]:
+    row = db.execute(
+        """
+        SELECT confidence, last_evidence_at, updated_at FROM lessons
+        WHERE id = %(id)s
+        """,
+        {"id": lesson_id},
+    ).fetchone()
+    assert row is not None
+    return {
+        "confidence": float(row["confidence"]),
+        "last_evidence_at": row["last_evidence_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _edge_relations(
+    db: psycopg.Connection[DictRow], lesson_id: int
+) -> dict[int, str]:
+    rows = db.execute(
+        "SELECT episode_id, relation FROM lesson_evidence WHERE lesson_id = %(id)s",
+        {"id": lesson_id},
+    ).fetchall()
+    return {int(row["episode_id"]): str(row["relation"]) for row in rows}
+
+
+def _edge_reason(
+    db: psycopg.Connection[DictRow], lesson_id: int, episode_id: int
+) -> str:
+    row = db.execute(
+        """
+        SELECT reason FROM lesson_evidence
+        WHERE lesson_id = %(lesson_id)s AND episode_id = %(episode_id)s
+        """,
+        {"lesson_id": lesson_id, "episode_id": episode_id},
+    ).fetchone()
+    assert row is not None
+    return str(row["reason"])
+
+
+class TestEvidenceMoveValidation:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return _seed_overrides()
+
+    async def test_nonexistent_lesson_is_error_nothing_written(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Failure QA: MCP error result, zero writes, same session recovers."""
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="late incident", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+
+            bogus_lesson = _err(
+                await session.call_tool(
+                    "memory_corroborate",
+                    {"lesson_id": 555555, "episode_id": episode, "reason": ""},
+                )
+            )
+            bogus_contradict = _err(
+                await session.call_tool(
+                    "memory_contradict",
+                    {"lesson_id": 555555, "episode_id": episode, "reason": ""},
+                )
+            )
+            # the SAME live session keeps serving after the errors
+            recovered = await _corroborate(session, lesson, episode)
+
+        assert "555555" in bogus_lesson
+        assert "555555" in bogus_contradict
+        assert recovered["applied"] is True
+        # nothing from the failed calls: 3 seed edges + the one recovery edge
+        assert len(_edge_relations(db, lesson)) == 4
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.60)
+
+    async def test_nonexistent_episode_is_error_nothing_written(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            error = _err(
+                await session.call_tool(
+                    "memory_corroborate",
+                    {"lesson_id": lesson, "episode_id": 987654, "reason": ""},
+                )
+            )
+
+        assert "987654" in error
+        assert len(_edge_relations(db, lesson)) == 3
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.50)
+
+
+class TestCorroborateTransitions:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return _seed_overrides()
+
+    async def test_absent_to_support_novel_day_moves_plus_0_1(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="novel-day confirmation", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+            # namespace override accepted per the every-tool contract (the ids
+            # alone scope a move — same inert-namespace precedent as usage)
+            moved = _ok(
+                await session.call_tool(
+                    "memory_corroborate",
+                    {
+                        "lesson_id": lesson,
+                        "episode_id": episode,
+                        "reason": "independent confirmation",
+                        "namespace": OTHER_NS,
+                    },
+                )
+            )
+
+        assert moved["applied"] is True
+        assert moved["relation"] == "support"
+        assert moved["confidence"] == pytest.approx(0.60)
+        state = _lesson_state(db, lesson)
+        assert state["confidence"] == pytest.approx(0.60)
+        assert state["last_evidence_at"] == NOVEL_DAY  # refreshed to episode date
+        assert _edge_relations(db, lesson)[episode] == "support"
+
+    async def test_absent_to_support_same_day_near_dup_moves_plus_0_03(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            # same UTC date as the day-1 support episodes -> novelty 0.3
+            episode = _insert_episode(db, goal="same-day echo", embedding=V_N1)
+            backdate("episodes", episode, at=DAY_1 + timedelta(hours=2))
+            moved = await _corroborate(session, lesson, episode)
+
+        assert moved["confidence"] == pytest.approx(0.50 + 0.1 * 0.3)  # 0.53
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.53)
+        assert _edge_relations(db, lesson)[episode] == "support"
+
+    async def test_cap_at_0_95_across_novel_corroborations(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            ladder: list[float] = []
+            for index, vector in enumerate((V_N1, V_N2, V_N3, V_N4, V_N5)):
+                episode = _insert_episode(
+                    db, goal=f"corroboration {index}", embedding=vector
+                )
+                backdate("episodes", episode, at=NOVEL_DAY + index * DAY)
+                moved = await _corroborate(session, lesson, episode)
+                assert moved["applied"] is True
+                ladder.append(moved["confidence"])
+
+        assert ladder == [pytest.approx(x) for x in (0.60, 0.70, 0.80, 0.90, 0.95)]
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.95)
+        assert len(_edge_relations(db, lesson)) == 8  # 3 seed + 5 corroborations
+
+    async def test_refine_to_support_applies_corroborate_delta(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, ep_r = await _seed_refine_edge_lesson(db, session)
+            moved = await _corroborate(session, lesson, ep_r)
+
+        # novelty vs the support set {ep_a}: distinct day, orthogonal -> 1.0
+        assert moved["applied"] is True
+        assert moved["confidence"] == pytest.approx(0.60)
+        assert _edge_relations(db, lesson)[ep_r] == "support"  # converted
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.60)
+
+    async def test_contradict_to_support_applies_corroborate_delta(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="flip target", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+            first = await _contradict(session, lesson, episode)
+            second = await _corroborate(session, lesson, episode)
+
+        assert first["confidence"] == pytest.approx(0.30)
+        assert second["confidence"] == pytest.approx(0.40)
+        assert _edge_relations(db, lesson)[episode] == "support"
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.40)
+
+    async def test_identical_support_retry_is_noop_writing_nothing(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            # pin updated_at so "unchanged" is assertable without now()
+            backdate("lessons.updated_at", lesson, at=T_BASE)
+            retried = await _corroborate(session, lesson, ep_a, reason="second look")
+
+        assert retried["applied"] is False
+        assert retried["confidence"] == pytest.approx(0.50)
+        state = _lesson_state(db, lesson)
+        assert state["confidence"] == pytest.approx(0.50)
+        assert state["last_evidence_at"] == DAY_3  # untouched
+        assert state["updated_at"] == T_BASE  # untouched: no write at all
+        assert _edge_relations(db, lesson)[ep_a] == "support"
+        assert _edge_reason(db, lesson, ep_a) == ""  # reason not overwritten
+
+    async def test_last_evidence_at_never_rewinds_past_current(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            # day2 sits BETWEEN the seed dates: novel, but older than DAY_3
+            episode = _insert_episode(db, goal="older corroboration", embedding=V_N1)
+            backdate("episodes", episode, at=DAY_2)
+            moved = await _corroborate(session, lesson, episode)
+
+        assert moved["confidence"] == pytest.approx(0.60)
+        state = _lesson_state(db, lesson)
+        assert state["confidence"] == pytest.approx(0.60)
+        assert state["last_evidence_at"] == DAY_3  # max(current, day2) = day3
+        assert state["updated_at"] > T_BASE  # the move DID touch the row
+
+
+class TestContradictTransitions:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return _seed_overrides()
+
+    async def test_absent_to_contradict_is_flat_minus_0_2_even_for_near_dup(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            # same-day near-dup of the support evidence: novelty would scale a
+            # corroboration to 0.3, but contradiction is FLAT -0.2
+            episode = _insert_episode(db, goal="same-day contradiction", embedding=V_N1)
+            backdate("episodes", episode, at=DAY_1 + timedelta(hours=3))
+            moved = await _contradict(session, lesson, episode)
+
+        assert moved["applied"] is True
+        assert moved["relation"] == "contradict"
+        assert moved["confidence"] == pytest.approx(0.30)
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.30)
+        assert _edge_relations(db, lesson)[episode] == "contradict"
+
+    async def test_floor_at_0_05(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            ladder: list[float] = []
+            for index, vector in enumerate((V_N1, V_N2, V_N3, V_N4)):
+                episode = _insert_episode(
+                    db, goal=f"contradiction {index}", embedding=vector
+                )
+                backdate("episodes", episode, at=NOVEL_DAY + index * DAY)
+                moved = await _contradict(session, lesson, episode)
+                assert moved["applied"] is True
+                ladder.append(moved["confidence"])
+
+        assert ladder == [pytest.approx(x) for x in (0.30, 0.10, 0.05, 0.05)]
+        state = _lesson_state(db, lesson)
+        assert state["confidence"] == pytest.approx(0.05)
+        assert len(_edge_relations(db, lesson)) == 7  # every edge still written
+        assert state["last_evidence_at"] == NOVEL_DAY + 3 * DAY
+
+    async def test_refine_to_contradict_applies_minus_0_2(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, ep_r = await _seed_refine_edge_lesson(db, session)
+            moved = await _contradict(session, lesson, ep_r)
+
+        assert moved["applied"] is True
+        assert moved["confidence"] == pytest.approx(0.30)
+        assert _edge_relations(db, lesson)[ep_r] == "contradict"
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.30)
+
+    async def test_support_to_contradict_applies_minus_0_2_once(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """A retried contradiction must not double-penalize (hardening)."""
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="once only", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+            corroborated = await _corroborate(session, lesson, episode)
+            contradicted = await _contradict(session, lesson, episode)
+            retried = await _contradict(session, lesson, episode)
+
+        assert corroborated["confidence"] == pytest.approx(0.60)
+        assert contradicted["confidence"] == pytest.approx(0.40)
+        assert retried["applied"] is False
+        assert retried["confidence"] == pytest.approx(0.40)
+        assert _edge_relations(db, lesson)[episode] == "contradict"
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.40)
+
+    async def test_identical_contradict_retry_is_noop(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="retry target", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+            first = await _contradict(session, lesson, episode)
+            second = await _contradict(session, lesson, episode)
+
+        assert first["confidence"] == pytest.approx(0.30)
+        assert second["applied"] is False
+        assert second["confidence"] == pytest.approx(0.30)
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.30)
+        assert len(_edge_relations(db, lesson)) == 4  # one edge, not two
+
+
+class TestInterleavedCurrentStateIdempotence:
+    """0.50 -> contradict 0.30 -> support 0.40 -> contradict 0.20 (sanctioned).
+
+    Idempotence is CURRENT-STATE-ONLY by design: a replayed transition after
+    an intervening change is indistinguishable from an intentional new move
+    (no operation-identity contract in v1) — this test DOCUMENTS it.
+    """
+
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return _seed_overrides()
+
+    async def test_support_contradict_support_contradict_lands_at_0_20(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            lesson, _ep_a, _ep_b, _ep_c = await _seed_half_confidence_lesson(
+                db, session
+            )
+            episode = _insert_episode(db, goal="interleaved target", embedding=V_N1)
+            backdate("episodes", episode, at=NOVEL_DAY)
+            first = await _contradict(session, lesson, episode)
+            second = await _corroborate(session, lesson, episode)
+            third = await _contradict(session, lesson, episode)
+
+        assert first["confidence"] == pytest.approx(0.30)
+        assert second["confidence"] == pytest.approx(0.40)
+        assert third["confidence"] == pytest.approx(0.20)
+        assert third["applied"] is True  # an intentional new move, not a retry
+        assert _lesson_state(db, lesson)["confidence"] == pytest.approx(0.20)
+        assert _edge_relations(db, lesson)[episode] == "contradict"
+        assert len(_edge_relations(db, lesson)) == 4  # one edge per (lesson, ep)
+
+
+class TestConcurrentCorroborations:
+    def test_two_threads_two_connections_both_moves_land(
+        self,
+        pg: str,
+        db: psycopg.Connection[DictRow],
+    ) -> None:
+        """FOR UPDATE serialization: no lost update (0.50 -> 0.70, not 0.60)."""
+        import threading
+
+        from agent_memory.config import Settings
+        from agent_memory.consolidation_tools import corroborate, write_lesson
+
+        settings = Settings(
+            DATABASE_URL=pg,
+            EMBED_IMPL="fake",
+            PGVECTOR_DIM=DIM,
+            FAKE_EMBED_OVERRIDES=json.dumps(_seed_overrides()),
+        )
+        ep_a = _insert_episode(db, goal="race near-dup one", embedding=V_X)
+        ep_b = _insert_episode(db, goal="race near-dup two", embedding=V_X)
+        ep_c = _insert_episode(db, goal="race distinct day", embedding=V_Y)
+        backdate("episodes", ep_a, at=DAY_1)
+        backdate("episodes", ep_b, at=DAY_1 + timedelta(hours=1))
+        backdate("episodes", ep_c, at=DAY_3)
+        seeded = write_lesson(
+            settings,
+            claim=SEED_CLAIM,
+            because=SEED_BECAUSE,
+            evidence=[
+                {"episode_id": ep_a, "relation": "support"},
+                {"episode_id": ep_b, "relation": "support"},
+                {"episode_id": ep_c, "relation": "support"},
+            ],
+        )
+        lesson = int(seeded["lesson_id"])
+
+        racers: list[tuple[datetime, Sequence[float]]] = [
+            (NOVEL_DAY, V_N1),
+            (NOVEL_DAY + DAY, V_N2),
+        ]
+        episodes: list[int] = []
+        for day, vector in racers:
+            episode = _insert_episode(db, goal=f"raced {day.date()}", embedding=vector)
+            backdate("episodes", episode, at=day)
+            episodes.append(episode)
+
+        barrier = threading.Barrier(2)
+        outcomes: list[tuple[str, Any]] = []
+        lock = threading.Lock()
+
+        def racer(episode_id: int) -> None:
+            barrier.wait(timeout=30.0)
+            try:
+                result = corroborate(
+                    settings,
+                    lesson_id=lesson,
+                    episode_id=episode_id,
+                    reason="raced corroboration",
+                )
+                with lock:
+                    outcomes.append(("ok", result))
+            except Exception as exc:  # noqa: BLE001 - recorded, asserted below
+                with lock:
+                    outcomes.append(("error", repr(exc)))
+
+        threads = [
+            threading.Thread(target=racer, args=(episode_id,))
+            for episode_id in episodes
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60.0)
+
+        kinds = sorted(kind for kind, _ in outcomes)
+        assert kinds == ["ok", "ok"], outcomes
+        confidences = sorted(
+            float(payload["confidence"]) for _, payload in outcomes
+        )
+        # serialized: one move lands on 0.60, the second reads 0.60 -> 0.70
+        assert confidences == [pytest.approx(0.60), pytest.approx(0.70)]
+        state = _lesson_state(db, lesson)
+        assert state["confidence"] == pytest.approx(0.70)  # no lost update
+        assert len(_edge_relations(db, lesson)) == 5  # both edges landed

@@ -1,10 +1,12 @@
 """DB-facing consolidation pipeline for the consolidate tools (DESIGN §8, §9).
 
 Owns the age-eligible episode pools and greedy scan clustering
-(``memory_consolidate_scan``, §8 step 1), and the lesson write pipeline
+(``memory_consolidate_scan``, §8 step 1), the lesson write pipeline
 (``memory_write_lesson``, §8 step 3): server-owned seed confidence, the
 per-namespace duplicate-claim guard with its replacement-lineage exemption,
-and the similar/contradicts/refines link writes.
+and the similar/contradicts/refines link writes — and the evidence moves
+(``memory_corroborate`` / ``memory_contradict``, §8 step 4): novelty-scaled
+confidence transitions executed atomically under the lesson row lock.
 
 SIZE_OK by plan contract: tasks 9-11 deliberately share this one module
 (scan + write + evidence moves); the scan portion is frozen and later
@@ -41,7 +43,10 @@ from agent_memory.config import Settings
 from agent_memory.consolidate import (
     Episode,
     collapse_incidents,
+    corroborate_delta,
+    contradict_delta,
     diversity,
+    novelty,
     seed_confidence,
 )
 from agent_memory.embed import load_embedder
@@ -479,3 +484,191 @@ def write_lesson(
     finally:
         connection.close()
     return {"lesson_id": lesson_id, "seed_confidence": confidence}
+
+
+# --- evidence-move pipeline (memory_corroborate / memory_contradict, §8 step 4)
+
+# Atomicity: one transaction opened by a row lock on the lesson. SELECT ...
+# FOR UPDATE serializes concurrent confidence movers — under READ COMMITTED
+# the lock wait re-reads the row, so the second mover computes from the
+# first mover's committed confidence (no lost update). The lesson row is
+# locked BEFORE any confidence read or write.
+LESSON_FOR_UPDATE_SQL = """
+    SELECT id, confidence, last_evidence_at
+    FROM lessons
+    WHERE id = %(id)s
+    FOR UPDATE
+"""
+
+MOVE_EPISODE_SQL = """
+    SELECT id, namespace, created_at, embedding
+    FROM episodes
+    WHERE id = %(id)s
+"""
+
+CURRENT_EDGE_SQL = """
+    SELECT relation FROM lesson_evidence
+    WHERE lesson_id = %(lesson_id)s AND episode_id = %(episode_id)s
+"""
+
+SUPPORT_EPISODES_SQL = """
+    SELECT e.id, e.namespace, e.created_at, e.embedding
+    FROM lesson_evidence le
+    JOIN episodes e ON e.id = le.episode_id
+    WHERE le.lesson_id = %(lesson_id)s AND le.relation = 'support'
+    ORDER BY e.id ASC
+"""
+
+# refine edges are INITIALIZATION-ONLY: the moves below never target refine,
+# so refine-targeting transitions (support->refine, contradict->refine) are
+# unrepresentable — only write_lesson's creation evidence produces refine.
+CONVERT_EDGE_SQL = """
+    UPDATE lesson_evidence
+    SET relation = %(relation)s, reason = %(reason)s
+    WHERE lesson_id = %(lesson_id)s AND episode_id = %(episode_id)s
+"""
+
+APPLY_MOVE_SQL = """
+    UPDATE lessons
+    SET confidence = %(confidence)s,
+        last_evidence_at = greatest(last_evidence_at, %(evidence_at)s),
+        updated_at = now()
+    WHERE id = %(id)s
+"""
+
+
+def _as_episode(row: DictRow) -> Episode:
+    return Episode(
+        id=int(row["id"]),
+        namespace=row["namespace"],
+        created_at=row["created_at"],
+        embedding=tuple(row["embedding"].to_list()),
+    )
+
+
+def _apply_evidence_move(
+    settings: Settings,
+    *,
+    lesson_id: int,
+    episode_id: int,
+    relation: Literal["support", "contradict"],
+    reason: str,
+) -> dict[str, Any]:
+    """One evidence move under the lesson row lock. Transition table:
+
+    absent->support, refine->support, contradict->support : corroborate_delta
+    absent->contradict, refine->contradict, support->contradict : contradict_delta
+    support->support, contradict->contradict : NO-OP (nothing written; a
+    retried contradiction must not double-penalize)
+
+    Novelty is computed against the EXISTING support edges before the new
+    edge exists (never against itself). Idempotence is CURRENT-STATE-ONLY by
+    design: a replayed transition after an intervening change is an
+    intentional new move (no operation-identity contract in v1).
+    """
+    connection: psycopg.Connection[DictRow] = db.connect()
+    try:
+        with connection.transaction():
+            lesson = connection.execute(
+                LESSON_FOR_UPDATE_SQL, {"id": lesson_id}
+            ).fetchone()
+            if lesson is None:
+                raise ToolError(f"lesson {lesson_id} does not exist")
+            episode = connection.execute(
+                MOVE_EPISODE_SQL, {"id": episode_id}
+            ).fetchone()
+            if episode is None:
+                raise ToolError(f"episode {episode_id} does not exist")
+            current = connection.execute(
+                CURRENT_EDGE_SQL,
+                {"lesson_id": lesson_id, "episode_id": episode_id},
+            ).fetchone()
+
+            if current is not None and current["relation"] == relation:
+                result = {
+                    "lesson_id": lesson_id,
+                    "episode_id": episode_id,
+                    "relation": relation,
+                    "confidence": float(lesson["confidence"]),
+                    "applied": False,
+                }
+            else:
+                confidence = float(lesson["confidence"])
+                if relation == "support":
+                    support_rows = connection.execute(
+                        SUPPORT_EPISODES_SQL, {"lesson_id": lesson_id}
+                    ).fetchall()
+                    confidence = corroborate_delta(
+                        confidence,
+                        novelty(
+                            _as_episode(episode),
+                            [_as_episode(row) for row in support_rows],
+                            settings.DEDUP_COS,
+                        ),
+                    )
+                else:
+                    confidence = contradict_delta(confidence)
+                if current is None:
+                    connection.execute(
+                        INSERT_EVIDENCE_SQL,
+                        {
+                            "lesson_id": lesson_id,
+                            "episode_id": episode_id,
+                            "relation": relation,
+                            "reason": reason,
+                        },
+                    )
+                else:
+                    connection.execute(
+                        CONVERT_EDGE_SQL,
+                        {
+                            "lesson_id": lesson_id,
+                            "episode_id": episode_id,
+                            "relation": relation,
+                            "reason": reason,
+                        },
+                    )
+                connection.execute(
+                    APPLY_MOVE_SQL,
+                    {
+                        "id": lesson_id,
+                        "confidence": confidence,
+                        "evidence_at": episode["created_at"],
+                    },
+                )
+                result = {
+                    "lesson_id": lesson_id,
+                    "episode_id": episode_id,
+                    "relation": relation,
+                    "confidence": confidence,
+                    "applied": True,
+                }
+    finally:
+        connection.close()
+    return result
+
+
+def corroborate(
+    settings: Settings, *, lesson_id: int, episode_id: int, reason: str = ""
+) -> dict[str, Any]:
+    """Insert/flip one support edge; confidence +0.1 x novelty, cap 0.95."""
+    return _apply_evidence_move(
+        settings,
+        lesson_id=lesson_id,
+        episode_id=episode_id,
+        relation="support",
+        reason=reason,
+    )
+
+
+def contradict(
+    settings: Settings, *, lesson_id: int, episode_id: int, reason: str = ""
+) -> dict[str, Any]:
+    """Insert/flip one contradict edge; confidence -0.2 flat, floor 0.05."""
+    return _apply_evidence_move(
+        settings,
+        lesson_id=lesson_id,
+        episode_id=episode_id,
+        relation="contradict",
+        reason=reason,
+    )
