@@ -26,6 +26,8 @@ def _cmd_serve() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agent-memory", description="Agent memory MCP server")
     sub = parser.add_subparsers(dest="command")
+    # A no-subcommand parse leaves `handler` unset unless defaulted here.
+    parser.set_defaults(handler=None)
     sub.add_parser("migrate", help="apply pending database migrations").set_defaults(
         handler=_cmd_migrate
     )
