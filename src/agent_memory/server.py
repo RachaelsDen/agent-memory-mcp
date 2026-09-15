@@ -34,6 +34,7 @@ from agent_memory.consolidation_tools import (
     write_lesson,
 )
 from agent_memory.embed import load_embedder
+from agent_memory.promotion import demote, promote
 from agent_memory.retrieval import run_retrieval
 from agent_memory.usage import report_usage
 
@@ -266,6 +267,53 @@ def create_server() -> MCPServer:
         return contradict(
             get_settings(), lesson_id=lesson_id, episode_id=episode_id, reason=reason
         )
+
+    @server.tool()
+    def memory_promote(
+        lesson_id: int,
+        *,
+        reason: str,
+        target_namespace: str = "global",
+        namespace: str | None = None,
+    ) -> dict[str, int]:
+        """Graduate one lesson to a broader namespace (DESIGN §11; manual only).
+
+        Copies the lesson into target_namespace with promoted_from
+        provenance, the human's reason, and promotion_seed_confidence frozen
+        at graduation — the copy keeps the same claim/because/holds_when/
+        fails_when, the same embedding, and the source's confidence, while
+        its usage stats reset to zero. All evidence edges are copied to the
+        same episode ids. The original row is untouched (copy, never move);
+        promoting into the lesson's own namespace is an error. namespace is
+        accepted per the every-tool contract; the lesson_id alone scopes the
+        source. Returns {"promoted_lesson_id": int}.
+        """
+        return promote(
+            lesson_id=lesson_id,
+            reason=reason,
+            target_namespace=target_namespace,
+        )
+
+    @server.tool()
+    def memory_demote(
+        lesson_id: int,
+        *,
+        reason: str,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire one promoted copy with a tombstone (DESIGN §11; never a delete).
+
+        Sets promotion_status='demoted' plus demoted_at and the demotion
+        reason on the copy; the row and its evidence edges are retained so
+        "why did the agent trust X in March?" stays answerable from the
+        data. The copy becomes invisible to retrieval from every namespace,
+        including 'global'. Only promoted copies (promoted_from_lesson_id
+        set) can be demoted; the original lesson is untouched throughout.
+        namespace is accepted per the every-tool contract; the lesson_id
+        alone scopes the move. Returns {"lesson_id": int,
+        "promotion_status": "demoted"}.
+        """
+        return demote(lesson_id=lesson_id, reason=reason)
 
     @server.tool()
     def memory_report_usage(
