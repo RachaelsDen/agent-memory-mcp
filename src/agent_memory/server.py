@@ -24,7 +24,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 
 from agent_memory import db
 from agent_memory.config import get_settings
-from agent_memory.consolidation_tools import consolidate_scan
+from agent_memory.consolidation_tools import consolidate_scan, write_lesson
 from agent_memory.embed import load_embedder
 from agent_memory.retrieval import run_retrieval
 from agent_memory.usage import report_usage
@@ -174,6 +174,44 @@ def create_server() -> MCPServer:
             get_settings(),
             pool=pool,
             min_cluster_size=min_cluster_size,
+            namespace=namespace,
+        )
+
+    @server.tool()
+    def memory_write_lesson(
+        claim: str,
+        because: str,
+        holds_when: str = "",
+        fails_when: str = "",
+        *,
+        evidence: list[dict[str, Any]],
+        contradicts: int | None = None,
+        replaces_disputed: int | None = None,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Store one drafted lesson with its evidence edges (DESIGN §8 step 3).
+
+        Each evidence entry is {"episode_id": int, "relation":
+        "support"|"refine"|"contradict", "reason": str}; at least one
+        support/refine edge is required. Confidence is seeded SERVER-side
+        from incident collapse + day diversity — never caller-supplied.
+        Near-duplicate claims (cosine > DUP_CLAIM_COS to an existing lesson
+        in the namespace) are rejected unless they supersede a disputed
+        lesson via replaces_disputed, which also writes the refines link
+        that completes the predecessor's pending re-derivation. Similar
+        lessons are linked in both directions; contradicts names an
+        opposing lesson (P9). Returns {"lesson_id": int,
+        "seed_confidence": float}.
+        """
+        return write_lesson(
+            get_settings(),
+            claim=claim,
+            because=because,
+            holds_when=holds_when,
+            fails_when=fails_when,
+            evidence=evidence,
+            contradicts=contradicts,
+            replaces_disputed=replaces_disputed,
             namespace=namespace,
         )
 
