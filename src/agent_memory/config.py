@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     SIMILAR_LINK_COS: float = 0.75
     DUP_CLAIM_COS: float = 0.95
     CONSOLIDATE_MIN_AGE_H: int = 1
+    FAKE_EMBED_OVERRIDES: str = ""  # JSON {text: [vector]} map consumed by the fake embedder
 
 
 @lru_cache(maxsize=1)
