@@ -26,6 +26,7 @@ from agent_memory import db
 from agent_memory.config import get_settings
 from agent_memory.embed import load_embedder
 from agent_memory.retrieval import run_retrieval
+from agent_memory.usage import report_usage
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
@@ -148,6 +149,26 @@ def create_server() -> MCPServer:
         """Explicit recall ("what do we know about X"); same shape as probe."""
         return run_retrieval(
             get_settings(), tool="search", query_text=query, k=k, namespace=namespace
+        )
+
+    @server.tool()
+    def memory_report_usage(
+        retrieval_event_id: int,
+        results: list[dict[str, Any]],
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Record explicit verdicts on records a retrieval showed (DESIGN §6).
+
+        Each results entry is {"id": typed ref, "outcome":
+        "used"|"helped"|"harmed"|"ignored"}; ids must be among the event's
+        returned_ids. The batch is all-or-nothing and each shown record takes
+        exactly one verdict. used/helped/harmed bump the record's access
+        stats (lessons also move usefulness +-1); ignored logs the report
+        only. namespace is accepted for signature uniformity — the
+        retrieval_event_id alone scopes the report.
+        """
+        return report_usage(
+            retrieval_event_id=retrieval_event_id, results=results
         )
 
     return server
