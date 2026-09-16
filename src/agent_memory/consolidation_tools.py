@@ -337,6 +337,15 @@ def write_lesson(
     """Write one drafted lesson + evidence edges + links; kwargs mirror the tool."""
     edges = _parse_evidence(evidence)
     effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    if effective_ns == "global":
+        # DESIGN §11: global lessons are created ONLY by memory_promote's
+        # copy-with-provenance insert; a direct write would land a global row
+        # with no promoted_from lineage (F4).
+        raise ToolError(
+            "namespace 'global' is promotion-only: global lessons are created "
+            "by memory_promote (copy with provenance, DESIGN §11); write the "
+            "lesson in its own namespace and promote it instead"
+        )
     vector = load_embedder(settings).embed([f"{claim} {because} {holds_when}"])[0]
 
     connection: psycopg.Connection[DictRow] = db.connect()

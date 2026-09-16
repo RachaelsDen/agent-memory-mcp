@@ -32,8 +32,14 @@ def connect() -> psycopg.Connection[DictRow]:
     conn = psycopg.Connection[DictRow].connect(
         get_settings().DATABASE_URL, autocommit=True, row_factory=dict_row
     )
-    pgvector.psycopg.register_vector(conn)
-    conn.execute("SET hnsw.ef_search = 100")
+    try:
+        pgvector.psycopg.register_vector(conn)
+        conn.execute("SET hnsw.ef_search = 100")
+    except BaseException:
+        # The caller never sees this connection, so a failed setup step must
+        # not leak it (F2): close before re-raising.
+        conn.close()
+        raise
     return conn
 
 

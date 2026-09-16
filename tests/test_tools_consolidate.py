@@ -1762,3 +1762,89 @@ class TestConcurrentCorroborations:
         state = _lesson_state(db, lesson)
         assert state["confidence"] == pytest.approx(0.70)  # no lost update
         assert len(_edge_relations(db, lesson)) == 5  # both edges landed
+
+
+# === F4 fix: namespace='global' is promotion-only ===========================
+# DESIGN §11 copy-with-provenance invariant: global lessons exist ONLY as
+# promoted copies (INSERT_PROMOTED_LESSON_SQL carries promoted_from_lesson_id
+# provenance); memory_write_lesson must refuse 'global' as its effective
+# target namespace — mirrors promote's own source==target rejection style.
+
+
+class TestWriteLessonGlobalNamespace:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return {
+            _lesson_text("global via write", "bypass attempt", ""): V_Y,
+            _lesson_text("local lesson", "local cause", ""): V_X,
+        }
+
+    async def test_global_namespace_is_error_session_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Failure QA: global target -> MCP error, zero rows, same session
+        keeps serving a normal-namespace write afterwards."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+
+        async with client as session:
+            error = _err(
+                await _write(
+                    session,
+                    claim="global via write",
+                    because="bypass attempt",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                    namespace="global",
+                )
+            )
+            recovered = _ok(
+                await _write(
+                    session,
+                    claim="local lesson",
+                    because="local cause",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+
+        assert "global" in error
+        assert "promote" in error
+        assert _count(db, "lessons", ns="global") == 0
+        assert _count(db, "lessons") == 1  # only the recovery write landed
+        assert int(recovered["lesson_id"]) > 0
+
+    async def test_promote_still_lands_global_lesson(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Pairing assertion: the SANCTIONED global path still works."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+
+        async with client as session:
+            written = _ok(
+                await _write(
+                    session,
+                    claim="local lesson",
+                    because="local cause",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+            promoted = _ok(
+                await session.call_tool(
+                    "memory_promote",
+                    {"lesson_id": written["lesson_id"], "reason": "broadly useful"},
+                )
+            )
+
+        row = db.execute(
+            """
+            SELECT namespace, promoted_from_lesson_id FROM lessons
+            WHERE id = %(id)s
+            """,
+            {"id": promoted["promoted_lesson_id"]},
+        ).fetchone()
+        assert row is not None
+        assert row["namespace"] == "global"
+        assert int(row["promoted_from_lesson_id"]) == int(written["lesson_id"])
+        assert _count(db, "lessons", ns="global") == 1

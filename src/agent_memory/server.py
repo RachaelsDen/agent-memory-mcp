@@ -211,8 +211,9 @@ def create_server() -> MCPServer:
         lesson via replaces_disputed, which also writes the refines link
         that completes the predecessor's pending re-derivation. Similar
         lessons are linked in both directions; contradicts names an
-        opposing lesson (P9). Returns {"lesson_id": int,
-        "seed_confidence": float}.
+        opposing lesson (P9). namespace 'global' is rejected — global
+        lessons are created only by memory_promote (DESIGN §11). Returns
+        {"lesson_id": int, "seed_confidence": float}.
         """
         return write_lesson(
             get_settings(),

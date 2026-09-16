@@ -10,7 +10,9 @@ delete: the copy persists with promotion_status='demoted' and its evidence
 edges are retained, while retrieval's LessonVisibility hides it from probe —
 including a probe with namespace='global' — driven here through the REAL
 probe tool from a THIRD namespace. Lessons come from the REAL write_lesson
-path; row/edge state is asserted via SQL on the ``db`` fixture. Time is
+path (one exception: the already-in-global fixture seeds via SQL because
+write_lesson rejects namespace='global' — F4); row/edge state is asserted
+via SQL on the ``db`` fixture. Time is
 pinned with backdate(at=<fixed tz-aware moments>) (no wall-clock-relative
 assertions); per-test truncate in conftest covers stale state; tee'd runs
 carry --durations=10 for the hung-command class.
@@ -403,16 +405,26 @@ class TestPromoteRejectsSameNamespace:
         db: psycopg.Connection[DictRow],
         client: AbstractAsyncContextManager[ClientSession],
     ) -> None:
-        ep_support = _insert_episode(
-            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
-        )
+        # F4: memory_write_lesson no longer accepts namespace='global' (the
+        # promotion-only invariant this test exercises), so the already-global
+        # fixture seeds via direct SQL — the sanctioned-fixture precedent of
+        # _dispute in test_tools_consolidate.py.
+        seeded = db.execute(
+            """
+            INSERT INTO lessons (namespace, claim, because, embedding)
+            VALUES (%(namespace)s, %(claim)s, %(because)s, %(embedding)s)
+            RETURNING id
+            """,
+            {
+                "namespace": GLOBAL,
+                "claim": CLAIM,
+                "because": BECAUSE,
+                "embedding": pgvector.Vector(V_L),
+            },
+        ).fetchone()
+        assert seeded is not None
+        lesson_id = int(seeded["id"])
         async with client as session:
-            written = await _write(
-                session,
-                evidence=[{"episode_id": ep_support, "relation": "support"}],
-                namespace=GLOBAL,
-            )
-            lesson_id = int(written["lesson_id"])
             lessons_before = _count(db, "lessons")
             edges_before = _count(db, "lesson_evidence")
             message = _err(await _promote(session, lesson_id, reason="re-graduate"))
