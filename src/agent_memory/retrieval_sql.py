@@ -97,7 +97,7 @@ FROM episodes WHERE id = ANY(%(ids)s)
 
 LESSON_CONTENT_SQL = """
 SELECT id, namespace, claim, because, holds_when, fails_when, confidence,
-       disputed, created_at, last_evidence_at
+       disputed, dispute_reason, created_at, last_evidence_at
 FROM lessons WHERE id = ANY(%(ids)s)
 """
 

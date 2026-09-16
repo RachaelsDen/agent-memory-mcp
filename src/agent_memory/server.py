@@ -34,6 +34,7 @@ from agent_memory.consolidation_tools import (
     write_lesson,
 )
 from agent_memory.embed import load_embedder
+from agent_memory.oversight import dispute, stats
 from agent_memory.promotion import demote, promote
 from agent_memory.retrieval import run_retrieval
 from agent_memory.usage import report_usage
@@ -334,6 +335,40 @@ def create_server() -> MCPServer:
         return report_usage(
             retrieval_event_id=retrieval_event_id, results=results
         )
+
+    @server.tool()
+    def memory_dispute(
+        lesson_id: int,
+        *,
+        reason: str,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Flag one lesson as wrong (DESIGN §10; human audit layer).
+
+        Sets disputed=true with the human's reason; the lesson stays
+        retrievable — every probe result carrying it includes "disputed":
+        true and "dispute_reason" — and the next consolidate_scan queues it
+        for re-derivation from its intact provenance. Re-disputing
+        overwrites the reason. namespace is accepted per the every-tool
+        contract; the lesson_id alone scopes the move. Returns
+        {"lesson_id": int, "disputed": true}.
+        """
+        return dispute(lesson_id=lesson_id, reason=reason)
+
+    @server.tool()
+    def memory_stats(namespace: str | None = None) -> dict[str, Any]:
+        """Namespace health check / curiosity pass (DESIGN §9, §10 feeds).
+
+        Returns episode_count, lesson_count, unconsolidated_backlog
+        (episodes no lesson cites), popular_but_shaky (active lessons with
+        confidence < 0.3 and access_count > 5), rare_critical_stale (active
+        lessons with confidence > SALIENCE_STALE whose evidence is older
+        than the probe staleness threshold — same formula, same settings),
+        cross_cutting_episodes (episodes cited by two or more distinct
+        lessons), and demoted_promotions (retained tombstones with reason
+        and dates). namespace is None -> MEMORY_NAMESPACE.
+        """
+        return stats(get_settings(), namespace=namespace)
 
     return server
 

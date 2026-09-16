@@ -221,4 +221,5 @@ def _lesson_record(row: DictRow, item: Scored, evidence_rows: list[DictRow]) -> 
     }
     if row["disputed"]:
         record["disputed"] = True
+        record["dispute_reason"] = row["dispute_reason"]
     return record

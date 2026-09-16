@@ -406,7 +406,9 @@ class TestLessonProvenance:
             payload = await _search(session, "indexes never help small tables")
         assert _result_ids(payload) == [f"lesson:{lesson_id}"]
         assert payload["results"][0]["disputed"] is True
-        assert "dispute_reason" not in payload["results"][0]  # migration 002 is task 13
+        # task-13 contract: disputed results always carry dispute_reason;
+        # this fixture SQL-sets disputed without one, so the value is null.
+        assert payload["results"][0]["dispute_reason"] is None
 
 
 class TestAccessStatsUntouched:
