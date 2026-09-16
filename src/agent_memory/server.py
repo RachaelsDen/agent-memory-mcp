@@ -397,6 +397,9 @@ def create_server() -> MCPServer:
 
 
 def serve() -> None:
+    # Every startup runs the filename-compare migration check: catches pending
+    # migrations on upgrade and fails fast on a dead DATABASE_URL.
+    db.migrate(get_settings().PGVECTOR_DIM)
     create_server().run()
 
 
