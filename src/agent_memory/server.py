@@ -33,6 +33,7 @@ from agent_memory.consolidation_tools import (
     contradict,
     write_lesson,
 )
+from agent_memory.digest import digest
 from agent_memory.embed import load_embedder
 from agent_memory.oversight import dispute, stats
 from agent_memory.promotion import demote, promote
@@ -369,6 +370,28 @@ def create_server() -> MCPServer:
         and dates). namespace is None -> MEMORY_NAMESPACE.
         """
         return stats(get_settings(), namespace=namespace)
+
+    @server.tool()
+    def memory_digest(namespace: str | None = None) -> dict[str, Any]:
+        """Render the namespace audit digest (DESIGN S10) to DIGEST_DIR.
+
+        Writes <DIGEST_DIR>/<slug>-<sha256(namespace)[:8]>-<YYYY-MM-DD>.md
+        with six sections in order: disputed (reason + source excerpts),
+        recently contradicted, popular-but-shaky, rare-critical-stale,
+        recently demoted promotions, and the unconsolidated backlog with a
+        plain lesson listing. A slug+hash collision with a DIFFERENT
+        namespace's file never overwrites it - the name deterministically
+        extends with a retry hash while keeping the scan prefix. The YAML
+        frontmatter carries the original namespace plus a full-precision
+        confidence snapshot; the next digest flags lessons whose confidence
+        dropped since the latest valid prior snapshot for this namespace
+        (any date; same-day included), falling back to lessons carrying
+        contradict edges when no valid snapshot exists. Returns
+        {"path": str, "flagged": [...], "flagged_count": int} where flagged
+        lists section 1-5 entry summaries. namespace is None ->
+        MEMORY_NAMESPACE.
+        """
+        return digest(get_settings(), namespace=namespace)
 
     return server
 
