@@ -19,6 +19,10 @@ With no valid snapshot anywhere, the fallback lists lessons carrying any
 queries verbatim (single source of thresholds). Frontmatter is YAML via
 ``yaml.safe_dump`` — never f-string interpolated — and the resolved path is
 verified to remain under DIGEST_DIR.
+
+The rendered document is screened for credential patterns before the
+write (Issue #9 defense in depth): a hit names 'digest content' (never
+the matched text) and NOTHING is written.
 """
 
 import hashlib
@@ -39,6 +43,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 from agent_memory import db
 from agent_memory.config import Settings
 from agent_memory.oversight import stats as oversight_stats
+from agent_memory.secrets import screen_document
 
 EXCERPT_CHARS = 140
 SNAPSHOT_TOLERANCE = 1e-6
@@ -275,8 +280,10 @@ def digest(settings: Settings, *, namespace: str | None = None) -> dict[str, Any
         *_section(5, "Recently demoted promotions", section5),
         *_section(6, "Unconsolidated backlog", section6),
     ]
+    text = "\n".join(document) + "\n"
+    screen_document(text)
     try:
-        target.write_text("\n".join(document) + "\n", encoding="utf-8")
+        target.write_text(text, encoding="utf-8")
     except OSError as error:
         raise ToolError(
             f"cannot write digest file {target} ({error.strerror or error})"

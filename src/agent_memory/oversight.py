@@ -2,11 +2,13 @@
 
 Dispute marks a lesson for human-flagged rederivation: ``disputed=true``
 plus the human's reason in migration 002's ``lessons.dispute_reason``.
-The lesson STAYS retrievable — retrieval.py exposes ``"disputed": true``
-and the reason on every probe result carrying it — and the next
-consolidate_scan queues it as a pending rederivation group. Re-disputing
-overwrites the reason (plain UPDATE semantics); a nonexistent lesson is
-an MCP error result.
+The reason is screened for credential-like content before any DB work
+(Issue #9); a hit is an MCP error naming the field only, never the
+matched content. The lesson STAYS retrievable — retrieval.py exposes
+``"disputed": true`` and the reason on every probe result carrying it —
+and the next consolidate_scan queues it as a pending rederivation group.
+Re-disputing overwrites the reason (plain UPDATE semantics); a nonexistent
+lesson is an MCP error result.
 
 Stats is the namespace health check feeding the digest's audit sections:
 two counts, the unconsolidated backlog, and four flag buckets. The health
@@ -38,6 +40,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 
 from agent_memory import db
 from agent_memory.config import Settings
+from agent_memory.secrets import screen_secrets
 
 POPULAR_SHAKY_CONF = 0.3
 POPULAR_SHAKY_ACCESS = 5
@@ -105,6 +108,7 @@ DEMOTED_PROMOTIONS_SQL = """
 def dispute(*, lesson_id: int, reason: str) -> dict[str, Any]:
     """Mark one lesson disputed with the human's reason; id-scoped like the
     other id-addressed mutations (the every-tool namespace param is inert)."""
+    screen_secrets(reason=reason)
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
         row = connection.execute(

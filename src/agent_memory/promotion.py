@@ -9,7 +9,9 @@ fails_when). Every unlisted column takes its schema default — the copy runs
 on fresh created_at/updated_at/last_evidence_at clocks. Evidence edges are
 copied to the same episode ids verbatim (relations and reasons included);
 lesson_links are NOT copied — promotion copies provenance, not the
-similarity graph. The original row is never written.
+similarity graph. The original row is never written. Both reasons are
+screened for credential-like content before any DB work (Issue #9); a
+hit is an MCP error naming the field only, never the matched content.
 
 Demotion is a TOMBSTONE, never a delete: promotion_status='demoted' +
 demoted_at + demotion_reason on the copy, with the row and its evidence
@@ -28,6 +30,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
     from mcp.server.fastmcp.exceptions import ToolError  # pyright: ignore[reportMissingImports]
 
 from agent_memory import db
+from agent_memory.secrets import screen_secrets
 
 # The lock serializes the read-copy pair against concurrent movers on the
 # source row (corroborate/contradict lock the same row); under READ COMMITTED
@@ -82,6 +85,7 @@ def promote(
     target_namespace: str = "global",
 ) -> dict[str, int]:
     """Copy one lesson into target_namespace; returns {"promoted_lesson_id": id}."""
+    screen_secrets(reason=reason)
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
         with connection.transaction():
@@ -126,6 +130,7 @@ def promote(
 
 def demote(*, lesson_id: int, reason: str) -> dict[str, Any]:
     """Tombstone one promoted copy; returns {"lesson_id", "promotion_status"}."""
+    screen_secrets(reason=reason)
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
         with connection.transaction():

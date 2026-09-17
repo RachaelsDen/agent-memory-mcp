@@ -809,3 +809,55 @@ class TestUnwritableDigestDir:
             # Same-session recovery: the failure never exits the process.
             stats = _ok(await session.call_tool("memory_stats", {}))
         assert stats["lesson_count"] == 0
+
+
+class TestSecretScreen:
+    """Issue #9 defense in depth: a secret that reached the DB through any
+    unscreened path (here: direct SQL on dispute_reason, bypassing the tool
+    screen) must never land in a DIGEST_DIR file — the rendered document is
+    screened before anything is written."""
+
+    async def test_smuggled_dispute_reason_blocks_digest_no_file_written(
+        self,
+        db: psycopg.Connection[DictRow],
+        pg: str,
+        tmp_path: Path,
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        row = db.execute(
+            """
+            INSERT INTO lessons (
+                namespace, claim, because, embedding, disputed, dispute_reason
+            ) VALUES (
+                %(ns)s, 'screened claim', 'cause', %(embedding)s, true, %(reason)s
+            )
+            RETURNING id
+            """,
+            {
+                "ns": DEFAULT_NS,
+                "embedding": pgvector.Vector(V1),
+                "reason": f"pasted the wrong log: {secret}",
+            },
+        ).fetchone()
+        assert row is not None
+
+        async with _spawn(pg, digest_dir=str(tmp_path)) as session:
+            message = _err(await session.call_tool("memory_digest", {}))
+            assert "digest content" in message
+            assert secret not in message
+            assert list(tmp_path.iterdir()) == []
+
+            # Same-session recovery: clear the smuggled reason and the very
+            # next digest call renders normally.
+            db.execute(
+                "UPDATE lessons SET dispute_reason = 'clean reason' WHERE id = %(id)s",
+                {"id": int(row["id"])},
+            )
+            payload = _ok(await session.call_tool("memory_digest", {}))
+
+        written = list(tmp_path.iterdir())
+        assert len(written) == 1
+        assert Path(payload["path"]) == written[0]
+        _, body = _read_digest(written[0])
+        assert "clean reason" in body
+        assert secret not in body

@@ -1848,3 +1848,129 @@ class TestWriteLessonGlobalNamespace:
         assert row["namespace"] == "global"
         assert int(row["promoted_from_lesson_id"]) == int(written["lesson_id"])
         assert _count(db, "lessons", ns="global") == 1
+
+
+# === Issue #9 section: reason-field secret screening on the write paths =====
+
+
+class TestReasonSecretScreen:
+    """Issue #9: evidence-reason strings on write_lesson and the evidence
+    moves are screened (capture contract) — field named, secret never echoed,
+    nothing written, same session recovers."""
+
+    async def test_write_lesson_evidence_reason_secret_rejected_then_clean_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+        async with client as session:
+            error = _err(
+                await _write(
+                    session,
+                    claim="c",
+                    because="b",
+                    evidence=[
+                        {"episode_id": episode, "relation": "support", "reason": f"see {secret}"}
+                    ],
+                )
+            )
+            assert "reason" in error
+            assert secret not in error
+            assert _count(db, "lessons") == 0
+            assert _count(db, "lesson_evidence") == 0
+
+            recovered = _ok(
+                await _write(
+                    session,
+                    claim="c",
+                    because="b",
+                    evidence=[
+                        {"episode_id": episode, "relation": "support", "reason": "clean"}
+                    ],
+                )
+            )
+        assert set(recovered) == {"lesson_id", "seed_confidence"}
+        assert _count(db, "lessons") == 1  # only the recovery write landed
+        assert _count(db, "lesson_evidence") == 1
+
+    async def test_corroborate_reason_secret_rejected_then_clean_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        seed = _insert_episode(db, goal="seed incident", embedding=V_X)
+        novel = _insert_episode(db, goal="novel incident", embedding=V_Y)
+        async with client as session:
+            written = _ok(
+                await _write(
+                    session,
+                    claim="c",
+                    because="b",
+                    evidence=[{"episode_id": seed, "relation": "support"}],
+                )
+            )
+            lesson_id = int(written["lesson_id"])
+            before = _lesson_state(db, lesson_id)["confidence"]
+
+            message = _err(
+                await session.call_tool(
+                    "memory_corroborate",
+                    {
+                        "lesson_id": lesson_id,
+                        "episode_id": novel,
+                        "reason": f"see {secret}",
+                    },
+                )
+            )
+            assert "reason" in message
+            assert secret not in message
+            assert _count(db, "lesson_evidence") == 1  # the seeding edge only
+            assert _lesson_state(db, lesson_id)["confidence"] == before
+
+            moved = await _corroborate(session, lesson_id, novel, "clean")
+        assert moved["applied"] is True
+        assert _count(db, "lesson_evidence") == 2
+
+    async def test_contradict_reason_secret_rejected_then_clean_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        seed = _insert_episode(db, goal="seed incident", embedding=V_X)
+        counter = _insert_episode(db, goal="counter incident", embedding=V_Y)
+        async with client as session:
+            written = _ok(
+                await _write(
+                    session,
+                    claim="c",
+                    because="b",
+                    evidence=[{"episode_id": seed, "relation": "support"}],
+                )
+            )
+            lesson_id = int(written["lesson_id"])
+            before = _lesson_state(db, lesson_id)["confidence"]
+
+            message = _err(
+                await session.call_tool(
+                    "memory_contradict",
+                    {
+                        "lesson_id": lesson_id,
+                        "episode_id": counter,
+                        "reason": f"see {secret}",
+                    },
+                )
+            )
+            assert "reason" in message
+            assert secret not in message
+            assert _count(db, "lesson_evidence") == 1  # the seeding edge only
+            assert _lesson_state(db, lesson_id)["confidence"] == before
+
+            moved = await _contradict(session, lesson_id, counter, "clean")
+        assert moved["applied"] is True
+        after = _lesson_state(db, lesson_id)["confidence"]
+        assert after == pytest.approx(max(before - 0.2, 0.05))
+        assert _count(db, "lesson_evidence") == 2
