@@ -45,7 +45,11 @@ new migration files and restarting.
 
 ## Host configuration
 
-All snippets run the installed `agent-memory` console script through `uv`. Replace `/path/to/agent-memory-mcp` in the snippets below with the absolute path of your clone. Set `MEMORY_NAMESPACE` to your agent/project scope.
+All snippets run the installed `agent-memory` console script through `uv`. Replace
+`/path/to/agent-memory-mcp` in the snippets below with the absolute path of your clone.
+Namespaces are exact scopes (`agent@this-project` convention; no prefix hierarchy). The
+intended setup is a per-project configuration pinning that project's namespace; a global
+config that hardcodes one project's namespace scopes every session across all repositories to it.
 
 ### Claude Desktop
 
@@ -64,16 +68,21 @@ All snippets run the installed `agent-memory` console script through `uv`. Repla
       ],
       "env": {
         "DATABASE_URL": "postgresql://agent_memory:agent_memory@localhost:55432/agent_memory",
-        "MEMORY_NAMESPACE": "claude@myproject"
+        "MEMORY_NAMESPACE": "claude@this-project"
       }
     }
   }
 }
 ```
 
+Because Claude Desktop has a single global configuration, to work across multiple
+projects duplicate the block with distinct server keys (e.g., `agent-memory-projA`)
+and namespaces, or omit `MEMORY_NAMESPACE` (defaulting to `default@local`) and pass
+the `namespace` tool parameter per call.
+
 ### opencode
 
-`opencode.json`:
+Repository-root `opencode.json` (project-level configuration overriding the user-level config):
 
 ```json
 {
@@ -87,13 +96,18 @@ All snippets run the installed `agent-memory` console script through `uv`. Repla
       ],
       "environment": {
         "DATABASE_URL": "postgresql://agent_memory:agent_memory@localhost:55432/agent_memory",
-        "MEMORY_NAMESPACE": "opencode@myproject"
+        "MEMORY_NAMESPACE": "opencode@this-project"
       },
       "enabled": true
     }
   }
 }
 ```
+
+In a user-level global config (`~/.config/opencode/opencode.json`), omit `MEMORY_NAMESPACE`
+rather than pinning a project—but note that omitting `MEMORY_NAMESPACE` globally requires a
+per-repo override in every project you use. Projects without an override will share `default@local`
+(treat that as a consciously-accepted shared scope, or pin per-repo configs instead).
 
 ### Generic MCP client
 
@@ -109,8 +123,14 @@ MCP error results, never process exits.
 ## Namespaces
 
 Memory is scoped by namespace (`agent@project` by convention; `global` holds
-promoted lessons every namespace can see). The effective namespace resolves
-as:
+promoted lessons every namespace can see). Namespaces are exact-match strings
+with no prefix hierarchy (`opencode` and `opencode@proj` are disjoint scopes).
+Lessons move between namespaces only through promotion; `global` is the one
+namespace every probe sees automatically, while promoted copies in other
+namespaces are visible when you query those namespaces directly. Evidence edges
+are agent-directed and may cite episodes from any namespace—the citing lesson's
+provenance then carries those episodes' excerpts wherever it is retrieved.
+The effective namespace resolves as:
 
 ```
 MEMORY_NAMESPACE (env)  <  --namespace (CLI flag)  <  namespace (per-tool param)
@@ -149,7 +169,7 @@ keeps it a pure health pass over the DB):
 15 3 * * *  cd /path/to/agent-memory-mcp && uv run agent-memory consolidate-scan > /dev/null 2>&1
 ```
 
-Add `--namespace me@myproject` before the subcommand to target a specific
+Add `--namespace me@this-project` before the subcommand to target a specific
 namespace.
 
 ## Environment variables
