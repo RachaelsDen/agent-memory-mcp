@@ -65,6 +65,7 @@ flowchart LR
         T3[tools: digest / dispute / stats]
         R[retrieve.py — hybrid RRF + scoring + spreading activation]
         E[embed.py — local sentence-transformers, pluggable]
+    end
     subgraph Store ["Postgres + pgvector"]
         D1[(episodes)]
         D2[(lessons)]
