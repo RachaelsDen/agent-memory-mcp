@@ -569,6 +569,117 @@ class TestStalenessNote:
         assert "staleness_note" not in by_id[f"episode:{fresh_episode}"]
 
 
+class TestPerLessonEvidenceIsolation:
+    """Issue #7 regression: multi-lesson probe results must not bleed evidence.
+
+    ``dict.fromkeys(lesson_ids, [])`` bound every lesson id to ONE shared
+    list, so each returned lesson displayed the union of ALL lessons'
+    evidence edges. Both lessons are crafted through the REAL
+    memory_write_lesson path with disjoint evidence episodes and share the
+    distinctive "quokka jam" vocabulary so one keyword-channel probe
+    (websearch_to_tsquery ANDs its terms) returns both.
+    """
+
+    async def test_each_lesson_lists_exactly_its_own_evidence_edges(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        async with client as session:
+            ep_ingest = _payload(
+                await session.call_tool(
+                    "memory_capture_episode",
+                    {
+                        "goal": "index quokka jam telemetry",
+                        "outcome": "index rebuild finished overnight",
+                        "surprise": 0.6,
+                    },
+                )
+            )["id"]
+            ep_backpressure = _payload(
+                await session.call_tool(
+                    "memory_capture_episode",
+                    {
+                        "goal": "index quokka jam backpressure",
+                        "outcome": "backpressure drained after batch tuning",
+                        "surprise": 0.5,
+                    },
+                )
+            )["id"]
+            ep_render = _payload(
+                await session.call_tool(
+                    "memory_capture_episode",
+                    {
+                        "goal": "render quokka jam dashboards",
+                        "outcome": "dashboard render cached successfully",
+                        "surprise": 0.4,
+                    },
+                )
+            )["id"]
+            ingest_lesson = _payload(
+                await session.call_tool(
+                    "memory_write_lesson",
+                    {
+                        "claim": "quokka jam ingest needs batch indexing",
+                        "because": "quokka jam telemetry overloads single-row inserts",
+                        "holds_when": "quokka jam pipeline runs nightly",
+                        "evidence": [
+                            {
+                                "episode_id": ep_ingest,
+                                "relation": "support",
+                                "reason": "ingest storm trace",
+                            },
+                            {
+                                "episode_id": ep_backpressure,
+                                "relation": "refine",
+                                "reason": "backpressure variant",
+                            },
+                        ],
+                    },
+                )
+            )["lesson_id"]
+            render_lesson = _payload(
+                await session.call_tool(
+                    "memory_write_lesson",
+                    {
+                        "claim": "quokka jam dashboards need render caching",
+                        "because": "dashboard panels recompute every request",
+                        "holds_when": "quokka jam panels have repeat viewers",
+                        "evidence": [
+                            {
+                                "episode_id": ep_render,
+                                "relation": "support",
+                                "reason": "render cache trace",
+                            },
+                        ],
+                    },
+                )
+            )["lesson_id"]
+            payload = await _probe(session, "quokka jam")
+        lessons_by_id = {
+            record["id"]: record
+            for record in payload["results"]
+            if record["record_type"] == "lesson"
+        }
+        assert set(lessons_by_id) == {
+            f"lesson:{ingest_lesson}",
+            f"lesson:{render_lesson}",
+        }
+        ingest_edges = {
+            (edge["episode"], edge["relation"], edge["reason"])
+            for edge in lessons_by_id[f"lesson:{ingest_lesson}"]["evidence"]
+        }
+        render_edges = {
+            (edge["episode"], edge["relation"], edge["reason"])
+            for edge in lessons_by_id[f"lesson:{render_lesson}"]["evidence"]
+        }
+        assert ingest_edges == {
+            (f"episode:{ep_ingest}", "support", "ingest storm trace"),
+            (f"episode:{ep_backpressure}", "refine", "backpressure variant"),
+        }
+        assert render_edges == {(f"episode:{ep_render}", "support", "render cache trace")}
+
+
 # ---------------------------------------------------------------------------
 # GOLDEN session (enable_indexscan=off in the SERVER's DATABASE_URL):
 # deterministic ranking goldens with exact-cosine sequential scans.

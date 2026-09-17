@@ -157,7 +157,8 @@ def _result_records(
         if lesson_ids
         else {}
     )
-    evidence_by_lesson: dict[int, list[DictRow]] = dict.fromkeys(lesson_ids, [])
+    # shared-list aliasing — every key must own its list; Issue #7.
+    evidence_by_lesson: dict[int, list[DictRow]] = {lesson_id: [] for lesson_id in lesson_ids}
     if lesson_ids:
         for row in connection.execute(EVIDENCE_SQL, {"ids": lesson_ids}):
             evidence_by_lesson[int(row["lesson_id"])].append(row)
