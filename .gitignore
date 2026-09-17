@@ -1,5 +1,41 @@
-.venv/
+# Bytecode / build
+*.py[cod]
+*$py.class
 __pycache__/
-.pytest_cache/
+build/
 dist/
-.omo/evidence/
+*.egg-info/
+.eggs/
+wheels/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.basedpyright/
+.tox/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+.benchmarks/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Project-local
+.omo/
+.agent-memory/
