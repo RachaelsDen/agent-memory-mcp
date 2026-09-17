@@ -125,10 +125,12 @@ MCP error results, never process exits.
 Memory is scoped by namespace (`agent@project` by convention; `global` holds
 promoted lessons every namespace can see). Namespaces are exact-match strings
 with no prefix hierarchy (`opencode` and `opencode@proj` are disjoint scopes).
-Cross-namespace movement happens only through promotion; `global` is the one
+Lessons move between namespaces only through promotion; `global` is the one
 namespace every probe sees automatically, while promoted copies in other
-namespaces are visible when you query those namespaces directly. The effective
-namespace resolves as:
+namespaces are visible when you query those namespaces directly. Evidence edges
+are agent-directed and may cite episodes from any namespace—the citing lesson's
+provenance then carries those episodes' excerpts wherever it is retrieved.
+The effective namespace resolves as:
 
 ```
 MEMORY_NAMESPACE (env)  <  --namespace (CLI flag)  <  namespace (per-tool param)
