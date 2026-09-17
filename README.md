@@ -32,6 +32,8 @@ Every tool takes a trailing optional `namespace` parameter (see
 ## Quickstart
 
 ```bash
+git clone https://github.com/RachaelsDen/agent-memory-mcp
+cd agent-memory-mcp
 docker compose up -d --wait          # Postgres 16 + pgvector on :55432
 uv sync                              # install into .venv
 uv run agent-memory migrate          # apply pending migrations (prints applied: 001_init.sql)
@@ -43,8 +45,7 @@ new migration files and restarting.
 
 ## Host configuration
 
-All snippets run the installed `agent-memory` console script through `uv`,
-from this checkout. Set `MEMORY_NAMESPACE` to your agent/project scope.
+All snippets run the installed `agent-memory` console script through `uv`. Replace `/path/to/agent-memory-mcp` in the snippets below with the absolute path of your clone. Set `MEMORY_NAMESPACE` to your agent/project scope.
 
 ### Claude Desktop
 
@@ -58,7 +59,7 @@ from this checkout. Set `MEMORY_NAMESPACE` to your agent/project scope.
       "args": [
         "run",
         "--directory",
-        "/mnt/projects/kgoodwin/AI-Systems/agent-memory",
+        "/path/to/agent-memory-mcp",
         "agent-memory"
       ],
       "env": {
@@ -81,7 +82,7 @@ from this checkout. Set `MEMORY_NAMESPACE` to your agent/project scope.
       "type": "local",
       "command": [
         "uv", "run",
-        "--directory", "/mnt/projects/kgoodwin/AI-Systems/agent-memory",
+        "--directory", "/path/to/agent-memory-mcp",
         "agent-memory"
       ],
       "environment": {
@@ -99,7 +100,7 @@ from this checkout. Set `MEMORY_NAMESPACE` to your agent/project scope.
 Any stdio MCP client: spawn the command below with the environment you want.
 
 ```bash
-uv run --directory /mnt/projects/kgoodwin/AI-Systems/agent-memory agent-memory
+uv run --directory /path/to/agent-memory-mcp agent-memory
 ```
 
 With no arguments the process serves MCP over stdio; tool errors come back as
@@ -142,10 +143,10 @@ keeps it a pure health pass over the DB):
 
 ```cron
 # Mondays 09:00 — render the audit digest for the default namespace
-0 9 * * 1  cd /mnt/projects/kgoodwin/AI-Systems/agent-memory && uv run agent-memory digest >> ~/.agent-memory/digest-cron.log 2>&1
+0 9 * * 1  cd /path/to/agent-memory-mcp && uv run agent-memory digest >> ~/.agent-memory/digest-cron.log 2>&1
 
 # Daily 03:15 — consolidation scan (cron entrypoint per DESIGN §8/§12)
-15 3 * * *  cd /mnt/projects/kgoodwin/AI-Systems/agent-memory && uv run agent-memory consolidate-scan > /dev/null 2>&1
+15 3 * * *  cd /path/to/agent-memory-mcp && uv run agent-memory consolidate-scan > /dev/null 2>&1
 ```
 
 Add `--namespace me@myproject` before the subcommand to target a specific
