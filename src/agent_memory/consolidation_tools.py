@@ -56,6 +56,7 @@ from agent_memory.consolidate import (
 )
 from agent_memory.embed import load_embedder
 from agent_memory.secrets import screen_secrets
+from agent_memory.session_state import resolve_namespace
 
 POOLS = ("fresh", "all")
 
@@ -156,7 +157,7 @@ def consolidate_scan(
     """Read-only consolidation scan; kwargs mirror the tool signature verbatim."""
     if pool not in POOLS:
         raise ToolError(f"invalid pool {pool!r}; expected 'fresh' or 'all'")
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     pool_sql = FRESH_POOL_SQL if pool == "fresh" else ALL_POOL_SQL
     episode_bind = {"ns": effective_ns, "min_age_h": settings.CONSOLIDATE_MIN_AGE_H}
 
@@ -343,7 +344,7 @@ def write_lesson(
     """Write one drafted lesson + evidence edges + links; kwargs mirror the tool."""
     edges = _parse_evidence(evidence)
     screen_secrets(reason=[edge.reason for edge in edges])
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     if effective_ns == "global":
         # DESIGN §11: global lessons are created ONLY by memory_promote's
         # copy-with-provenance insert; a direct write would land a global row

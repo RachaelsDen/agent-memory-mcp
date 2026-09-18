@@ -54,7 +54,7 @@ def main() -> None:
         "--namespace",
         default=None,
         help="override MEMORY_NAMESPACE for this process "
-        "(precedence: env < --namespace < per-tool param)",
+        "(precedence: env < --namespace < session-set < per-tool param)",
     )
     sub = parser.add_subparsers(dest="command")
     # A no-subcommand parse leaves `handler` unset unless defaulted here.

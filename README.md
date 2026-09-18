@@ -4,11 +4,11 @@ A persistent-memory MCP server for coding agents: episode capture with secret
 screening, hybrid keyword+vector retrieval with spreading activation,
 exposure/outcome feedback, agent-in-the-loop consolidation with
 diversity-priced confidence, manual cross-namespace promotion with tombstone
-demotion, and a markdown digest audit layer. 13 MCP tools over stdio, backed
+demotion, and a markdown digest audit layer. 14 MCP tools over stdio, backed
 by Postgres + pgvector. The full design, rationale, and scope lines live in
 [DESIGN.md](DESIGN.md).
 
-## The 13 tools
+## The 14 tools
 
 | Tool | Purpose |
 | --- | --- |
@@ -25,6 +25,7 @@ by Postgres + pgvector. The full design, rationale, and scope lines live in
 | `memory_dispute` | Flag a lesson as wrong (human audit layer) |
 | `memory_digest` | Render the namespace audit digest to `DIGEST_DIR` |
 | `memory_stats` | Namespace health check / curiosity pass |
+| `memory_set_namespace` | Set this session's default namespace (Issue #4) |
 
 Every tool takes a trailing optional `namespace` parameter (see
 [Namespaces](#namespaces) below).
@@ -133,7 +134,7 @@ provenance then carries those episodes' excerpts wherever it is retrieved.
 The effective namespace resolves as:
 
 ```
-MEMORY_NAMESPACE (env)  <  --namespace (CLI flag)  <  namespace (per-tool param)
+MEMORY_NAMESPACE (env)  <  --namespace (CLI flag)  <  memory_set_namespace (session)  <  namespace (per-tool param)
 ```
 
 The global `--namespace` flag overrides `MEMORY_NAMESPACE` for the whole
@@ -141,6 +142,24 @@ process, so `agent-memory --namespace me@proj stats` reports on that
 namespace even if the env var says another, and
 `python -m agent_memory --namespace me@proj` serves tools whose default
 namespace is `me@proj`. A per-tool `namespace` argument always wins over both.
+
+`memory_set_namespace` (called once at session start) sets a session-scoped
+default that outranks env and the flag but is itself outranked by any
+per-tool param; the override lives only in the server process (one stdio
+server = one client session) and dies with it. It rejects `global` as a
+session default — global lessons are created only by `memory_promote` — and
+rejects empty or whitespace-only values. When `MEMORY_NAMESPACE` is unset
+at startup, the agent half of the default namespace is derived from the
+initialize handshake's clientInfo name (sanitized; e.g. a client naming
+itself `Claude Desktop` defaults to `claude-desktop@local`), falling back
+to `default@local` when no clientInfo is available. When `MEMORY_NAMESPACE`
+is set, clientInfo is ignored — explicit config always wins.
+
+For agentic hosts this enables a set-and-forget workflow: run one global
+server config with no `MEMORY_NAMESPACE`, and have the agent call
+`memory_set_namespace("me@this-project")` at the start of each session
+(e.g. one line in `AGENTS.md`/`CLAUDE.md`). Per-project host configs remain
+the answer for non-agentic clients.
 
 ## CLI reference
 
@@ -182,7 +201,7 @@ or a pydantic-settings source.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://agent_memory:agent_memory@localhost:55432/agent_memory` | Postgres connection string |
-| `MEMORY_NAMESPACE` | `default@local` | Default namespace for captures and queries |
+| `MEMORY_NAMESPACE` | `default@local` | Default namespace for captures and queries; when unset, derived from the client's clientInfo name (`<client>@local`) |
 | `DIGEST_DIR` | `~/.agent-memory/digest` | Where digest markdown files are written (`~` expanded at use) |
 
 ### Embeddings

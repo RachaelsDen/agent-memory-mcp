@@ -41,6 +41,7 @@ except ImportError:  # fallback targets mcp 1.x, which is not installed here
 from agent_memory import db
 from agent_memory.config import Settings
 from agent_memory.secrets import screen_secrets
+from agent_memory.session_state import resolve_namespace
 
 POPULAR_SHAKY_CONF = 0.3
 POPULAR_SHAKY_ACCESS = 5
@@ -130,13 +131,13 @@ def _count(
 
 
 def stats(settings: Settings, *, namespace: str | None = None) -> dict[str, Any]:
-    """Namespace health check; None namespace -> settings.MEMORY_NAMESPACE."""
+    """Namespace health check; None namespace -> resolved default."""
     if not 0.0 < settings.STALE_ENV_FRESH < 1.0:
         raise ToolError(
             f"STALE_ENV_FRESH must satisfy 0 < value < 1, got "
             f"{settings.STALE_ENV_FRESH!r}"
         )
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     bind = {"ns": effective_ns}
     staleness_bind = {"tau_env": settings.TAU_ENV_H, "stale_env": settings.STALE_ENV_FRESH}
 
