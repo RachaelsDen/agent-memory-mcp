@@ -181,9 +181,11 @@ script.
 In `digest --all-namespaces` output, every TSV field (namespace, path, flagged
 count) is backslash-escaped — `\` as `\\`, tab as `\t`, newline as `\n`,
 carriage return as `\r` — so one namespace always prints exactly one 3-field
-line. Unescape each field in a single left-to-right pass when consuming the
-output (chained `str.replace` calls corrupt sequences like `\\t`, the escaped
-form of a literal backslash before a `t`).
+line. On errors, the middle field carries the literal `ERROR` and the third
+field carries the error message (`<ns>\tERROR\t<message>`). Unescape each field
+in a single left-to-right pass when consuming the output (chained `str.replace`
+calls corrupt sequences like `\\t`, the escaped form of a literal backslash
+before a `t`).
 
 ## Cron
 
@@ -201,8 +203,9 @@ keeps it a pure health pass over the DB):
 `--namespace me@this-project` before the subcommand targets ONE specific
 namespace; `--all-namespaces` on `digest` or `consolidate-scan` covers every
 namespace that exists (promoted-copy `global` included, even while it holds
-no rows; an empty database yields no digests and `{"namespaces": []}`). The
-two flags are mutually exclusive.
+no rows; an empty database yields no digests and `{"namespaces": []}`). Error lines
+in `digest --all-namespaces` parse identically as 3 tab-separated fields; consumers
+detect errors when field 2 is `ERROR`. The two flags are mutually exclusive.
 
 ## Environment variables
 

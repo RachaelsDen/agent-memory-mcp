@@ -53,8 +53,8 @@ def _cmd_digest(args: Namespace) -> None:
         try:
             payload = digest(get_settings(), namespace=namespace)
         except Exception as exc:
-            message = f"ERROR: {type(exc).__name__}: {exc}"
-            print(f"{_tsv_escape(namespace)}\t{_tsv_escape(message)}")
+            message = f"{type(exc).__name__}: {exc}"
+            print(f"{_tsv_escape(namespace)}\tERROR\t{_tsv_escape(message)}")
             failed = True
             continue
         print(
@@ -119,8 +119,9 @@ def main() -> None:
         "--all-namespaces",
         action="store_true",
         help="digest every existing namespace; one '<ns>\\t<path>\\t<flagged_count>' "
-        "stdout line per namespace (exit nonzero if any fails); each field is "
-        "backslash-escaped (\\\\, \\t, \\n, \\r) — unescape when consuming",
+        "stdout line per namespace (errors emit '<ns>\\tERROR\\t<message>'; exit "
+        "nonzero if any fails); each field is backslash-escaped (\\\\, \\t, \\n, \\r) "
+        "— unescape when consuming",
     )
     digest_parser.set_defaults(handler=_cmd_digest)
     sub.add_parser(

@@ -155,6 +155,41 @@ class TestStateSecretScreening:
     """Issue #13: state_at_encoding JSON is screened recursively — every
     string value at any nesting depth, against the shared pattern list."""
 
+    @pytest.mark.parametrize(
+        ("state", "desc"),
+        [
+            ({SECRET: "metadata"}, "key"),
+            ({"metadata": SECRET}, "value"),
+        ],
+        ids=["secret_in_key", "secret_in_value"],
+    )
+    async def test_secret_in_dict_key_or_value_rejected_without_write_and_session_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+        state: dict[str, Any],
+        desc: str,
+    ) -> None:
+        """Issue #13 fix: dict keys containing secrets are screened along with values
+        (isError True, field 'state_at_encoding' named, no secret echo, no row,
+        same session recovers)."""
+        episode = {**EPISODE, "state_at_encoding": state}
+        async with client as session:
+            result = await session.call_tool("memory_capture_episode", episode)
+            assert isinstance(result, CallToolResult)
+            assert result.is_error is True
+            block = result.content[0]
+            assert isinstance(block, TextContent)
+            error_text = block.text
+            assert "state_at_encoding" in error_text
+            assert SECRET not in error_text
+
+            episode_id = await _capture(session, EPISODE)
+
+        count = db.execute("SELECT count(*) AS n FROM episodes").fetchone()
+        assert count is not None and count["n"] == 1
+        assert episode_id >= 1
+
     async def test_secret_nested_in_dict_rejected_without_write_and_session_recovers(
         self,
         db: psycopg.Connection[DictRow],

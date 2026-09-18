@@ -54,7 +54,8 @@ def screen_json(name: str, value: object) -> None:
         if contains_secret(value):
             _reject(name)
     elif isinstance(value, dict):
-        for nested in value.values():
+        for key, nested in value.items():
+            screen_json(name, key)
             screen_json(name, nested)
     elif isinstance(value, list):
         for nested in value:

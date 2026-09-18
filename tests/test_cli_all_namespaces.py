@@ -275,7 +275,8 @@ def test_digest_all_namespaces_reports_per_namespace_errors_and_exits_nonzero(
     db: psycopg.Connection[DictRow], pg: str, tmp_path: Path
 ) -> None:
     """An unusable DIGEST_DIR fails every namespace individually: one ERROR line
-    each, the loop keeps going, and the final exit is nonzero."""
+    each with 3 escaped fields (field 2 == 'ERROR', field 3 == message), the loop
+    keeps going, and the final exit is nonzero."""
     _seed(db)
     blocker = tmp_path / "blocker"
     blocker.write_text("a regular file, so the mkdir under it fails")
@@ -289,4 +290,8 @@ def test_digest_all_namespaces_reports_per_namespace_errors_and_exits_nonzero(
     assert ran.returncode == 1
     lines = ran.stdout.splitlines()
     assert [line.split("\t")[0] for line in lines] == EXPECTED_NAMESPACES
-    assert all("\tERROR:" in line for line in lines)
+    for line in lines:
+        fields = line.split("\t")
+        assert len(fields) == 3, f"Expected 3 fields, got {len(fields)}: {line!r}"
+        assert fields[1] == "ERROR"
+        assert "NotADirectoryError" in fields[2] or "Not a directory" in fields[2]
