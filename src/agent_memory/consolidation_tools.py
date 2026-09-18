@@ -239,7 +239,11 @@ EVIDENCE_EPISODES_SQL = """
 """
 
 NAMESPACE_LESSONS_SQL = """
-    SELECT id, embedding, claim_embedding FROM lessons WHERE namespace = %(ns)s
+    SELECT id, claim, embedding, claim_embedding FROM lessons WHERE namespace = %(ns)s
+"""
+
+HEAL_CLAIM_EMBEDDING_SQL = """
+    UPDATE lessons SET claim_embedding = %(claim_embedding)s WHERE id = %(id)s
 """
 
 REPLACEMENT_TARGET_SQL = """
@@ -367,6 +371,27 @@ def write_lesson(
     try:
         with connection.transaction():
             connection.execute(LESSON_WRITE_LOCK_SQL, {"ns": effective_ns})
+            existing_unhealed = connection.execute(
+                NAMESPACE_LESSONS_SQL, {"ns": effective_ns}
+            ).fetchall()
+            unhealed = [
+                row for row in existing_unhealed if row["claim_embedding"] is None
+            ]
+            if unhealed:
+                healed_vectors = load_embedder(settings).embed(
+                    [row["claim"] for row in unhealed]
+                )
+                for row, vec in zip(unhealed, healed_vectors):
+                    connection.execute(
+                        HEAL_CLAIM_EMBEDDING_SQL,
+                        {
+                            "id": row["id"],
+                            "claim_embedding": pgvector.Vector(vec),
+                        },
+                    )
+
+        with connection.transaction():
+            connection.execute(LESSON_WRITE_LOCK_SQL, {"ns": effective_ns})
 
             episode_rows = connection.execute(
                 EVIDENCE_EPISODES_SQL,
@@ -413,16 +438,13 @@ def write_lesson(
                 (int(row["id"]), _cosine(composite_vector, row["embedding"].to_list()))
                 for row in existing
             ]
-            # The rejection bar is claim identity. NULL claim_embedding rows
-            # (written before 003's backfill reached them) carry no claim
-            # identity to compare and are skipped by this bar.
+            # The rejection bar is claim identity over the now-complete set.
             claim_twins = [
                 (
                     int(row["id"]),
                     _cosine(claim_vector, row["claim_embedding"].to_list()),
                 )
                 for row in existing
-                if row["claim_embedding"] is not None
             ]
             for lesson_pk, claim_cosine in claim_twins:
                 if lesson_pk not in exempt and claim_cosine > settings.DUP_CLAIM_COS:

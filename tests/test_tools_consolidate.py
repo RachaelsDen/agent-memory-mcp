@@ -2155,20 +2155,21 @@ class TestLegacyNullClaimEmbedding:
     def fake_embed_overrides(self) -> dict[str, list[float]]:
         return {
             # composite pinned to the legacy row's V_X -> similar links fire
-            _lesson_text(_LEGACY_CLAIM, "mid-flight rows corrupt otherwise", ""): V_X,
+            _lesson_text(
+                "distinct claim about schema migration",
+                "mid-flight rows corrupt otherwise",
+                "",
+            ): V_X,
         }
 
-    async def test_null_claim_row_skipped_and_composite_still_links(
+    async def test_null_claim_row_healed_and_different_claim_still_links(
         self,
         db: psycopg.Connection[DictRow],
         client: AbstractAsyncContextManager[ClientSession],
     ) -> None:
-        """Pre-backfill rows (claim_embedding NULL) carry no claim identity:
-        the claim bar skips them; the composite channel still links.
-
-        The legacy row is inserted AFTER the server's startup migrate (which
-        backfills NULLs), modeling a pre-003 writer leaving rows behind on a
-        migrated database.
+        """Pre-backfill rows (claim_embedding NULL) carry no claim identity initially:
+        the lazy heal populates their claim_embedding, non-duplicate claims are admitted,
+        and composite similarity links are created.
         """
         episode = _insert_episode(db, goal="incident", embedding=V_Y)
 
@@ -2187,17 +2188,19 @@ class TestLegacyNullClaimEmbedding:
             ).fetchone()
             assert row is not None
             legacy = int(row["id"])
+            db.commit()
 
             payload = _ok(
                 await _write(
                     session,
-                    claim=_LEGACY_CLAIM,
+                    claim="distinct claim about schema migration",
                     because="mid-flight rows corrupt otherwise",
                     evidence=[{"episode_id": episode, "relation": "support"}],
                 )
             )
 
         new_id = int(payload["lesson_id"])
+        db.commit()
         links = db.execute(
             """
             SELECT lesson_id, related_lesson_id FROM lesson_links
@@ -2207,6 +2210,68 @@ class TestLegacyNullClaimEmbedding:
         assert {
             (int(link["lesson_id"]), int(link["related_lesson_id"])) for link in links
         } == {(new_id, legacy), (legacy, new_id)}
+
+        legacy_after = db.execute(
+            "SELECT claim_embedding FROM lessons WHERE id = %(id)s",
+            {"id": legacy},
+        ).fetchone()
+        assert legacy_after is not None
+        assert legacy_after["claim_embedding"] is not None
+
+    async def test_null_claim_embedding_healed_before_duplicate_bar(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Rolling-upgrade simulation: an older server inserts a lesson with
+        claim_embedding = NULL after migration 003's startup backfill.
+
+        write_lesson with the verbatim claim must lazily heal the legacy row's
+        NULL claim_embedding in DB, then reject the new claim as a duplicate.
+        """
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+
+        async with client as session:
+            row = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding)
+                VALUES (%(ns)s, %(claim)s, 'legacy gist', %(embedding)s)
+                RETURNING id
+                """,
+                {
+                    "ns": DEFAULT_NS,
+                    "claim": _LEGACY_CLAIM,
+                    "embedding": pgvector.Vector(V_X),
+                },
+            ).fetchone()
+            assert row is not None
+            legacy = int(row["id"])
+            db.commit()
+
+            legacy_before = db.execute(
+                "SELECT claim_embedding FROM lessons WHERE id = %(id)s",
+                {"id": legacy},
+            ).fetchone()
+            assert legacy_before is not None
+            assert legacy_before["claim_embedding"] is None
+
+            error = _err(
+                await _write(
+                    session,
+                    claim=_LEGACY_CLAIM,
+                    because="mid-flight rows corrupt otherwise",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+            assert "duplicate claim" in error
+
+            db.commit()
+            legacy_after = db.execute(
+                "SELECT claim_embedding FROM lessons WHERE id = %(id)s",
+                {"id": legacy},
+            ).fetchone()
+            assert legacy_after is not None
+            assert legacy_after["claim_embedding"] is not None
 
 
 class TestClaimEmbeddingMigrationBackfill:
