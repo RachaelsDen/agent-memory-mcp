@@ -8,6 +8,8 @@ demotion, and a markdown digest audit layer. 14 MCP tools over stdio, backed
 by Postgres + pgvector. The full design, rationale, and scope lines live in
 [DESIGN.md](DESIGN.md).
 
+The installed tool is pinned at install time — pull/rebuild doesn't update it; upgrade via `uv tool install --force .` at the new tag.
+
 ## The 14 tools
 
 | Tool | Purpose |
@@ -33,21 +35,40 @@ Every tool takes a trailing optional `namespace` parameter (see
 ## Quickstart
 
 ```bash
+# Clone for docker-compose.yml (the installed tool runs independently of the checkout)
 git clone https://github.com/RachaelsDen/agent-memory-mcp
 cd agent-memory-mcp
+git checkout v1.1.0
+
+# Install (pinned at release; upgrades are deliberate)
+uv tool install --force .
+uv tool update-shell                 # ensure the tool bin dir is on PATH (reload shell after)
+
+# Database
 docker compose up -d --wait          # Postgres 16 + pgvector on :55432
-uv sync                              # install into .venv
-uv run agent-memory migrate          # apply pending migrations (prints applied: 001_init.sql)
+agent-memory migrate                 # applies migrations 001-004 (from the installed package)
 ```
 
 Then point an MCP host at the server (next section). The server checks for
-pending migrations again on every startup, so upgrading just means dropping
-new migration files and restarting.
+pending migrations again on every startup, so upgrading means checking out the new tag (`git fetch --tags && git checkout <new-tag>` before reinstalling via `uv tool install --force .`) and restarting — the server applies any new migrations automatically on startup.
+
+### Development
+
+For working on the server itself, clone the repository and run via `uv`:
+
+```bash
+git clone https://github.com/RachaelsDen/agent-memory-mcp
+cd agent-memory-mcp
+uv sync                              # install into .venv
+uv run agent-memory migrate          # apply pending migrations
+uv run agent-memory                  # run server from checkout
+```
+
+The installed tool is pinned and unaffected by repository changes.
 
 ## Host configuration
 
-All snippets run the installed `agent-memory` console script through `uv`. Replace
-`/path/to/agent-memory-mcp` in the snippets below with the absolute path of your clone.
+The installed binary `agent-memory` is the command (or the absolute path `/Users/alice/.local/bin/agent-memory` — get it via `uv tool dir --bin` or `which agent-memory` — if PATH isn't inherited by desktop apps).
 With no namespace configuration, the server derives an agent namespace from the MCP client's
 `clientInfo` name, such as `claude-desktop@local`. Namespaces are exact scopes
 (`agent@this-project` convention; no prefix hierarchy). Set an override only when you want to pin
@@ -55,19 +76,13 @@ a project or deliberately share another scope.
 
 ### Claude Desktop
 
-`claude_desktop_config.json`:
+`claude_desktop_config.json` (use `/Users/alice/.local/bin/agent-memory` if PATH isn't inherited):
 
 ```json
 {
   "mcpServers": {
     "agent-memory": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/path/to/agent-memory-mcp",
-        "agent-memory"
-      ],
+      "command": "agent-memory",
       "env": {
         "DATABASE_URL": "postgresql://agent_memory:agent_memory@localhost:55432/agent_memory"
       }
@@ -91,8 +106,6 @@ user-level config:
     "agent-memory": {
       "type": "local",
       "command": [
-        "uv", "run",
-        "--directory", "/path/to/agent-memory-mcp",
         "agent-memory"
       ],
       "environment": {
@@ -114,7 +127,7 @@ pin a repository with `MEMORY_NAMESPACE` or `memory_set_namespace` when project 
 Any stdio MCP client: spawn the command below with the environment you want.
 
 ```bash
-uv run --directory /path/to/agent-memory-mcp agent-memory
+agent-memory
 ```
 
 With no arguments the process serves MCP over stdio; tool errors come back as
@@ -189,15 +202,20 @@ before a `t`).
 
 ## Cron
 
+Create the log directory once: `mkdir -p ~/.agent-memory`
+
 Digest weekly, scan daily (the scan is read-only; redirecting to /dev/null
 keeps it a pure health pass over the DB):
 
 ```cron
+# Set PATH so cron finds binaries installed in /home/you/.local/bin
+PATH=/home/you/.local/bin:/usr/bin:/bin
+
 # Mondays 09:00 — render the audit digest for every namespace that exists
-0 9 * * 1  cd /path/to/agent-memory-mcp && uv run agent-memory digest --all-namespaces >> ~/.agent-memory/digest-cron.log 2>&1
+0 9 * * 1  agent-memory digest --all-namespaces >> $HOME/.agent-memory/digest-cron.log 2>&1
 
 # Daily 03:15 — consolidation scan over every namespace (cron entrypoint per DESIGN §8/§12)
-15 3 * * *  cd /path/to/agent-memory-mcp && uv run agent-memory consolidate-scan --all-namespaces > /dev/null 2>&1
+15 3 * * *  agent-memory consolidate-scan --all-namespaces > /dev/null 2>&1
 ```
 
 `--namespace me@this-project` before the subcommand targets ONE specific
