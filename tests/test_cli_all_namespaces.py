@@ -13,12 +13,15 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
 import pgvector
 import psycopg
 import yaml
+from mcp import ClientSession
+from mcp.types import CallToolResult, TextContent
 from psycopg.rows import DictRow
 
 from tests.conftest import backdate
@@ -30,6 +33,37 @@ BETA = "beta-ns@proj"  # episodes only
 GAMMA = "gamma-lessons@proj"  # lesson only: proves the lessons arm of the union
 # Fixed under both C and en_US collations: alpha < beta < gamma < global.
 EXPECTED_NAMESPACES = [ALPHA, BETA, GAMMA, "global"]
+
+# Control-char namespace: legal through real capture today (resolve_namespace
+# returns a per-tool param verbatim), hostile to a raw TSV line.
+WEIRD_NS = "weird\tns\nx"
+WEIRD_NS_ESCAPED = "weird\\tns\\nx"
+
+_TSV_UNESCAPES = {"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}
+
+
+def _tsv_unescape(text: str) -> str:
+    """Single-pass inverse of the CLI's TSV escaping (\\, \\t, \\n, \\r)."""
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and text[index + 1] in _TSV_UNESCAPES:
+            out.append(_TSV_UNESCAPES[text[index + 1]])
+            index += 2
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def _ok(result: CallToolResult) -> dict[str, Any]:
+    assert result.is_error is False, result.content
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    payload: dict[str, Any] = json.loads(block.text)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _run_cli(
@@ -149,6 +183,63 @@ def test_consolidate_scan_all_namespaces_single_json(
     assert len(alpha["clusters"]) == 1  # identical vectors -> one cluster
     assert len(alpha["clusters"][0]["episodes"]) == 2
     assert entries[EXPECTED_NAMESPACES.index("global")]["clusters"] == []
+
+    # Streamed shape, still ONE valid JSON document: the wrapper opens on
+    # its own line, each namespace payload prints as its own line, and the
+    # document closes with "]}".
+    lines = ran.stdout.splitlines()
+    assert lines[0] == '{"namespaces": ['
+    assert lines[-1] == "]}"
+    assert len(lines) == len(EXPECTED_NAMESPACES) + 2
+
+
+async def test_digest_all_namespaces_escapes_control_characters(
+    db: psycopg.Connection[DictRow],
+    pg: str,
+    tmp_path: Path,
+    client: AbstractAsyncContextManager[ClientSession],
+) -> None:
+    """A namespace carrying a tab and a newline (legal through real capture
+    today) must not fragment its digest line: exactly one stdout line for it,
+    the namespace printed in backslash-escaped form, and raw tabs appearing
+    only as separators so the line splits into exactly the 3 documented
+    fields."""
+    async with client as session:
+        captured = _ok(
+            await session.call_tool(
+                "memory_capture_episode",
+                {
+                    "goal": "namespace with control characters",
+                    "outcome": "captured legally",
+                    "namespace": WEIRD_NS,
+                },
+            )
+        )
+        assert captured["id"] == 1  # the only episode in this database
+
+    digest_dir = tmp_path / "digests"
+    ran = _run_cli(
+        pg, "digest", "--all-namespaces", env_extra={"DIGEST_DIR": str(digest_dir)}
+    )
+    assert ran.returncode == 0, ran.stderr
+
+    lines = ran.stdout.splitlines()
+    # WEIRD_NS plus the always-enumerated global: the control chars must not
+    # have split one namespace's line into several.
+    assert len(lines) == 2
+    weird_lines = [line for line in lines if line.split("\t")[0] == WEIRD_NS_ESCAPED]
+    assert len(weird_lines) == 1
+
+    namespace, path_text, flagged = weird_lines[0].split("\t")
+    assert _tsv_unescape(namespace) == WEIRD_NS
+    assert flagged.isdigit()
+
+    path = Path(path_text)
+    assert path.is_file(), path
+    assert path.parent == digest_dir
+    frontmatter, _, _ = path.read_text(encoding="utf-8").partition("\n---\n")
+    meta: dict[str, Any] = yaml.safe_load(frontmatter.removeprefix("---\n"))
+    assert meta["namespace"] == WEIRD_NS
 
 
 def test_all_namespaces_and_namespace_flag_are_mutually_exclusive(

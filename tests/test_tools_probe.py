@@ -47,7 +47,11 @@ DEFAULT_NS = "default@local"
 T_FIXED = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
 
 OPTS_INDEXSCAN_OFF = "options=-c%20enable_indexscan%3Doff"
-OPTS_SEQSCAN_OFF = "options=-c%20enable_seqscan%3Doff"
+# Forced-HNSW diagnostic: seq scan AND sort off. The sort knob is required
+# since migration 004 added the general lessons(namespace) btree — without it
+# the planner can satisfy the namespace filter by bitmap-scanning that index
+# and sorting, starving the ordered hnsw scan this diagnostic exists to prove.
+OPTS_FORCED_HNSW = "options=-c%20enable_seqscan%3Doff%20-c%20enable_sort%3Doff"
 
 
 def _angled(step: int) -> list[float]:
@@ -890,7 +894,7 @@ class TestKResolution:
 
 
 # ---------------------------------------------------------------------------
-# DIAGNOSTIC session (enable_seqscan=off): forced-HNSW execution + EXPLAIN.
+# DIAGNOSTIC session (seq scan + sort off): forced-HNSW execution + EXPLAIN.
 # ---------------------------------------------------------------------------
 
 _REPRESENTATIVE_VECTOR_SQL = """
@@ -918,13 +922,13 @@ class TestHnswDiagnostic:
         _insert_lesson(
             db, claim="quiet observatory baseline", because="dark run", embedding=V_ALT
         )
-        async with _server(pg, {"aurora telemetry surge": V_Q}, url_options=OPTS_SEQSCAN_OFF) as session:
+        async with _server(pg, {"aurora telemetry surge": V_Q}, url_options=OPTS_FORCED_HNSW) as session:
             payload = await _probe(session, "aurora telemetry", approach="surge")
         # Correct results under the forced-HNSW planner (execution proof).
         assert _result_ids(payload) == [f"episode:{episode_id}"]
         # EXPLAIN on a diagnostic connection carrying the SAME libpq options in
         # its own URL (session-scoped by contract; never SET LOCAL).
-        with psycopg.connect(_with_options(pg, OPTS_SEQSCAN_OFF), autocommit=True) as conn:
+        with psycopg.connect(_with_options(pg, OPTS_FORCED_HNSW), autocommit=True) as conn:
             pgvector.psycopg.register_vector(conn)
             explained = conn.execute(
                 "EXPLAIN (FORMAT JSON) " + _REPRESENTATIVE_VECTOR_SQL,

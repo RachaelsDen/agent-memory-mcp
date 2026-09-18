@@ -15,6 +15,19 @@ from agent_memory.digest import digest
 from agent_memory.oversight import all_namespaces, stats
 
 
+def _tsv_escape(field: str) -> str:
+    """Backslash-escape TSV-breaking characters so one namespace prints one
+    3-field line: namespaces and paths are free strings, so a raw tab would
+    add a field and a raw newline would split the line. Consumers unescape
+    \\\\, \\t, \\n, \\r (README, CLI reference)."""
+    return (
+        field.replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
 def _cmd_migrate(args: Namespace) -> None:
     settings = get_settings()
     for name in db.migrate(settings.PGVECTOR_DIM):
@@ -40,10 +53,14 @@ def _cmd_digest(args: Namespace) -> None:
         try:
             payload = digest(get_settings(), namespace=namespace)
         except Exception as exc:
-            print(f"{namespace}\tERROR: {type(exc).__name__}: {exc}")
+            message = f"ERROR: {type(exc).__name__}: {exc}"
+            print(f"{_tsv_escape(namespace)}\t{_tsv_escape(message)}")
             failed = True
             continue
-        print(f"{namespace}\t{payload['path']}\t{payload['flagged_count']}")
+        print(
+            f"{_tsv_escape(namespace)}\t{_tsv_escape(str(payload['path']))}"
+            f"\t{_tsv_escape(str(payload['flagged_count']))}"
+        )
     if failed:
         raise SystemExit(1)
 
@@ -62,14 +79,21 @@ def _cmd_consolidate_scan(args: Namespace) -> None:
             )
         )
         return
-    # Each per-namespace payload already carries its own "namespace" field.
-    scans = [
-        consolidate_scan(
+    # Stream one payload per line instead of materializing every namespace's
+    # payload first: memory stays bounded to a single namespace's scan even
+    # when stdout is /dev/null, and the document stays one valid JSON doc.
+    namespaces = all_namespaces()
+    if not namespaces:
+        print('{"namespaces": []}')
+        return
+    print('{"namespaces": [')
+    last = len(namespaces) - 1
+    for position, namespace in enumerate(namespaces):
+        payload = consolidate_scan(
             get_settings(), pool="fresh", min_cluster_size=2, namespace=namespace
         )
-        for namespace in all_namespaces()
-    ]
-    print(json.dumps({"namespaces": scans}))
+        print(json.dumps(payload) + ("," if position < last else ""))
+    print("]}")
 
 
 def main() -> None:
@@ -95,7 +119,8 @@ def main() -> None:
         "--all-namespaces",
         action="store_true",
         help="digest every existing namespace; one '<ns>\\t<path>\\t<flagged_count>' "
-        "stdout line per namespace (exit nonzero if any fails)",
+        "stdout line per namespace (exit nonzero if any fails); each field is "
+        "backslash-escaped (\\\\, \\t, \\n, \\r) — unescape when consuming",
     )
     digest_parser.set_defaults(handler=_cmd_digest)
     sub.add_parser(

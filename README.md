@@ -178,6 +178,13 @@ agent-memory consolidate-scan --all-namespaces   # {"namespaces": [per-namespace
 `python -m agent_memory` is the same dispatcher as the `agent-memory` console
 script.
 
+In `digest --all-namespaces` output, every TSV field (namespace, path, flagged
+count) is backslash-escaped — `\` as `\\`, tab as `\t`, newline as `\n`,
+carriage return as `\r` — so one namespace always prints exactly one 3-field
+line. Unescape each field in a single left-to-right pass when consuming the
+output (chained `str.replace` calls corrupt sequences like `\\t`, the escaped
+form of a literal backslash before a `t`).
+
 ## Cron
 
 Digest weekly, scan daily (the scan is read-only; redirecting to /dev/null
