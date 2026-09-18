@@ -9,6 +9,7 @@ never echoed back.
 """
 
 import re
+from typing import NoReturn
 
 try:  # mcp>=2 renamed FastMCP to MCPServer; keep both import spellings working
     from mcp.server.mcpserver.exceptions import ToolError
@@ -31,14 +32,33 @@ def contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
+def _reject(name: str) -> NoReturn:
+    raise ToolError(
+        f"field {name!r} appears to contain a secret; refusing to store it; redact and retry"
+    )
+
+
 def screen_secrets(**fields: str | list[str] | None) -> None:
     """Reject any text field (or tag entry) carrying a credential pattern."""
     for name, value in fields.items():
         texts: list[str] = [value] if isinstance(value, str) else (value or [])
         if any(contains_secret(text) for text in texts):
-            raise ToolError(
-                f"field {name!r} appears to contain a secret; refusing to store it; redact and retry"
-            )
+            _reject(name)
+
+
+def screen_json(name: str, value: object) -> None:
+    """Reject a JSON value when any string in it, at any nesting depth of
+    dicts/lists, carries a credential pattern (Issue #13: state_at_encoding).
+    Non-string scalars (int/float/bool/None) pass through unchecked."""
+    if isinstance(value, str):
+        if contains_secret(value):
+            _reject(name)
+    elif isinstance(value, dict):
+        for nested in value.values():
+            screen_json(name, nested)
+    elif isinstance(value, list):
+        for nested in value:
+            screen_json(name, nested)
 
 
 def screen_document(text: str) -> None:
