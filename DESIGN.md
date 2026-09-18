@@ -429,10 +429,10 @@ a false memory the compressor wrote, `memory_dispute` forces re-derivation from 
   text fields (`goal`, `expectation`, `action`, `outcome`, `raw_text`, `tags`) and in the reason
   fields of dispute, demote, promote, write-lesson evidence, corroborate, and contradict.
   `state_at_encoding` (arbitrary JSON context, stored for audit, never embedded or matched per P4)
-  is currently not screened — credential-like values supplied there can be stored (open question
-  #13 on extending the screen; the digest defense-in-depth pass does not re-scan it either since it
-  renders only reason/dispute text). A defense-in-depth scan rejects the rendered digest before it
-  reaches `DIGEST_DIR`. Lesson body fields (`claim`, `because`, `holds_when`, `fails_when`) are
+  is screened recursively alongside the six text fields: every string value in the JSON, at any
+  depth of dict/list nesting, is checked against the same pattern list, while non-string scalars
+  pass through unchecked. A defense-in-depth scan rejects the rendered digest before it reaches
+  `DIGEST_DIR`. Lesson body fields (`claim`, `because`, `holds_when`, `fails_when`) are
   deliberately unscreened because they derive from screened episodes and host authorship.
 - **Local-first:** default embedder is local; no data leaves the machine. Remote embedders are opt-in.
 - **Trust boundary:** lessons are agent-authored claims about the world. Hosts should treat probe

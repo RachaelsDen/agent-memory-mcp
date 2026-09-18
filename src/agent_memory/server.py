@@ -44,7 +44,7 @@ from agent_memory.embed import load_embedder
 from agent_memory.oversight import dispute, stats
 from agent_memory.promotion import demote, promote
 from agent_memory.retrieval import run_retrieval
-from agent_memory.secrets import screen_secrets
+from agent_memory.secrets import screen_json, screen_secrets
 from agent_memory.session_state import (
     note_client_name,
     resolve_namespace,
@@ -110,6 +110,7 @@ def create_server() -> MCPServer:
             raw_text=raw_text,
             tags=tags,
         )
+        screen_json("state_at_encoding", state_at_encoding)
         embedded_text = f"{goal} {expectation} {action} {outcome}"
         vector = load_embedder(settings).embed([embedded_text])[0]
         effective_namespace = resolve_namespace(settings, namespace)
