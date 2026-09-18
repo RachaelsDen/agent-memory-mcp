@@ -22,6 +22,11 @@ A disputed lesson stays PENDING until some replacement cites it via
 ``refines`` points AT it (the completion marker write_lesson writes). Pending
 rederivation groups ignore pool, min_cluster_size, and the age gate:
 ordinary thresholds must never swallow re-derivation (§8 Reconsolidation).
+
+Every free-text reason (write_lesson evidence reasons and the corroborate/
+contradict move reasons) is screened for credential-like content before
+any DB work (Issue #9); a hit is an MCP error naming the field only,
+never the matched content.
 """
 
 from collections.abc import Sequence
@@ -50,6 +55,7 @@ from agent_memory.consolidate import (
     seed_confidence,
 )
 from agent_memory.embed import load_embedder
+from agent_memory.secrets import screen_secrets
 
 POOLS = ("fresh", "all")
 
@@ -336,6 +342,7 @@ def write_lesson(
 ) -> dict[str, Any]:
     """Write one drafted lesson + evidence edges + links; kwargs mirror the tool."""
     edges = _parse_evidence(evidence)
+    screen_secrets(reason=[edge.reason for edge in edges])
     effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
     if effective_ns == "global":
         # DESIGN §11: global lessons are created ONLY by memory_promote's
@@ -575,6 +582,7 @@ def _apply_evidence_move(
     design: a replayed transition after an intervening change is an
     intentional new move (no operation-identity contract in v1).
     """
+    screen_secrets(reason=reason)
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
         with connection.transaction():

@@ -5,12 +5,13 @@ turns that into ``CallToolResult(isError=True)``; a failed call NEVER exits
 the process, so the same session keeps serving subsequent requests. Captured
 text is screened for credential-like content (DESIGN §11) and rejected with
 an error naming the FIELD only — the matched content is never echoed back.
+The screen lives in ``agent_memory.secrets`` (Issue #9), shared with the
+reason fields of the other write tools and the digest renderer.
 
 SIZE_OK by plan contract: every plan tool registers on this one app, so the
 file grows by one thin wrapper per task; logic lives in the tool modules.
 """
 
-import re
 from typing import Any
 
 import pgvector
@@ -20,10 +21,8 @@ from psycopg.types.json import Jsonb
 
 try:  # mcp>=2 renamed FastMCP to MCPServer; keep both import spellings working
     from mcp.server.mcpserver import MCPServer
-    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # fallback targets mcp 1.x, which is not installed here
     from mcp.server.fastmcp import FastMCP as MCPServer  # pyright: ignore[reportAttributeAccessIssue]
-    from mcp.server.fastmcp.exceptions import ToolError  # pyright: ignore[reportMissingImports]
 
 from agent_memory import db
 from agent_memory.config import get_settings
@@ -38,27 +37,8 @@ from agent_memory.embed import load_embedder
 from agent_memory.oversight import dispute, stats
 from agent_memory.promotion import demote, promote
 from agent_memory.retrieval import run_retrieval
+from agent_memory.secrets import screen_secrets
 from agent_memory.usage import report_usage
-
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"eyJhbGciOi[A-Za-z0-9._-]{20,}"),
-)
-
-
-def _screen_secrets(**fields: str | list[str] | None) -> None:
-    """Reject any text field (or tag entry) carrying a credential pattern."""
-    for name, value in fields.items():
-        texts: list[str] = [value] if isinstance(value, str) else (value or [])
-        if any(pattern.search(text) for text in texts for pattern in _SECRET_PATTERNS):
-            raise ToolError(
-                f"field {name!r} appears to contain a secret; refusing to store it; redact and retry"
-            )
 
 
 def create_server() -> MCPServer:
@@ -84,7 +64,7 @@ def create_server() -> MCPServer:
         "goal expectation action outcome".
         """
         settings = get_settings()
-        _screen_secrets(
+        screen_secrets(
             goal=goal,
             expectation=expectation,
             action=action,

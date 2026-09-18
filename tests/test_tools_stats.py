@@ -678,6 +678,50 @@ class TestDispute:
             message = _err(await _dispute(session, 424242, "no such lesson"))
         assert "424242" in message
 
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "sk-AbCdEf0123456789AbCdEf0123456789",
+            "ghp_AbCdEf0123456789AbCdEf01234567890123",
+            "AKIA0123456789ABCDEF",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ],
+    )
+    async def test_secret_reason_rejected_without_write_and_session_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+        secret: str,
+    ) -> None:
+        """Issue #9: dispute reasons are screened (capture contract) — field
+        named, secret never echoed, nothing written, same session recovers."""
+        seed = _insert_episode(db, goal="seed one", embedding=V1, at=DAY_1)
+        async with client as session:
+            written = await _write(
+                session,
+                claim=CLAIM_1,
+                because=BECAUSE_1,
+                evidence=[{"episode_id": seed, "relation": "support"}],
+            )
+            lesson_id = int(written["lesson_id"])
+
+            message = _err(
+                await _dispute(session, lesson_id, f"pasted the wrong log: {secret}")
+            )
+            assert "reason" in message
+            assert secret not in message
+
+            untouched = db.execute(
+                "SELECT disputed, dispute_reason FROM lessons WHERE id = %(id)s",
+                {"id": lesson_id},
+            ).fetchone()
+            assert untouched is not None
+            assert untouched["disputed"] is False
+            assert untouched["dispute_reason"] is None
+
+            recovered = _ok(await _dispute(session, lesson_id, "wrong premise"))
+        assert recovered == {"lesson_id": lesson_id, "disputed": True}
+
 
 class TestStaleEnvFreshValidation:
     """0 < STALE_ENV_FRESH < 1 is validated before ln() ever runs."""

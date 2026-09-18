@@ -508,3 +508,70 @@ class TestDemoteValidation:
             )
         assert isinstance(probe["retrieval_event_id"], int)
         assert _count(db, "lessons") == 0
+
+
+class TestReasonSecretScreen:
+    """Issue #9: promote/demote reasons are screened (capture contract) —
+    field named, secret never echoed, nothing written, same session recovers."""
+
+    async def test_promote_reason_secret_rejected_then_clean_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        seed = _insert_episode(db, goal="seed", embedding=V_L, at=DAY_1)
+        async with client as session:
+            written = await _write(
+                session, evidence=[{"episode_id": seed, "relation": "support"}]
+            )
+            lesson_id = int(written["lesson_id"])
+
+            message = _err(
+                await _promote(session, lesson_id, reason=f"pasted the wrong log: {secret}")
+            )
+            assert "reason" in message
+            assert secret not in message
+            assert _count(db, "lessons") == 1  # the source only — no copy row
+
+            promoted = _ok(await _promote(session, lesson_id, reason="broadly useful"))
+        row = db.execute(
+            "SELECT promotion_reason FROM lessons WHERE id = %(id)s",
+            {"id": promoted["promoted_lesson_id"]},
+        ).fetchone()
+        assert row is not None
+        assert row["promotion_reason"] == "broadly useful"
+        assert _count(db, "lessons") == 2
+
+    async def test_demote_reason_secret_rejected_then_clean_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        secret = "sk-AbCdEf0123456789AbCdEf0123456789"
+        seed = _insert_episode(db, goal="seed", embedding=V_L, at=DAY_1)
+        async with client as session:
+            written = await _write(
+                session, evidence=[{"episode_id": seed, "relation": "support"}]
+            )
+            copy_id = int(
+                _ok(
+                    await _promote(
+                        session, int(written["lesson_id"]), reason="graduate"
+                    )
+                )["promoted_lesson_id"]
+            )
+
+            message = _err(
+                await _demote(session, copy_id, reason=f"pasted the wrong log: {secret}")
+            )
+            assert "reason" in message
+            assert secret not in message
+            status = db.execute(
+                "SELECT promotion_status FROM lessons WHERE id = %(id)s", {"id": copy_id}
+            ).fetchone()
+            assert status is not None
+            assert status["promotion_status"] == "active"
+
+            demoted = _ok(await _demote(session, copy_id, reason="stale globally"))
+        assert demoted == {"lesson_id": copy_id, "promotion_status": "demoted"}
