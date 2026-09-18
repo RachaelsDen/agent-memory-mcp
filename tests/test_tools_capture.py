@@ -16,6 +16,9 @@ from tests.conftest import backdate
 
 SECRET = "sk-AbCdEf0123456789AbCdEf0123456789"
 
+AKIA_SECRET = "AKIAIOSFODNN7EXAMPLE"
+JWT_SECRET = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token-sig"
+
 EPISODE: dict[str, Any] = {
     "goal": "ship the retry logic",
     "expectation": "tests pass on first run",
@@ -146,6 +149,116 @@ async def test_secret_rejected_without_write_and_session_recovers(
     count = db.execute("SELECT count(*) AS n FROM episodes").fetchone()
     assert count is not None and count["n"] == 1
     assert episode_id >= 1
+
+
+class TestStateSecretScreening:
+    """Issue #13: state_at_encoding JSON is screened recursively — every
+    string value at any nesting depth, against the shared pattern list."""
+
+    @pytest.mark.parametrize(
+        ("state", "desc"),
+        [
+            ({SECRET: "metadata"}, "key"),
+            ({"metadata": SECRET}, "value"),
+        ],
+        ids=["secret_in_key", "secret_in_value"],
+    )
+    async def test_secret_in_dict_key_or_value_rejected_without_write_and_session_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+        state: dict[str, Any],
+        desc: str,
+    ) -> None:
+        """Issue #13 fix: dict keys containing secrets are screened along with values
+        (isError True, field 'state_at_encoding' named, no secret echo, no row,
+        same session recovers)."""
+        episode = {**EPISODE, "state_at_encoding": state}
+        async with client as session:
+            result = await session.call_tool("memory_capture_episode", episode)
+            assert isinstance(result, CallToolResult)
+            assert result.is_error is True
+            block = result.content[0]
+            assert isinstance(block, TextContent)
+            error_text = block.text
+            assert "state_at_encoding" in error_text
+            assert SECRET not in error_text
+
+            episode_id = await _capture(session, EPISODE)
+
+        count = db.execute("SELECT count(*) AS n FROM episodes").fetchone()
+        assert count is not None and count["n"] == 1
+        assert episode_id >= 1
+
+    async def test_secret_nested_in_dict_rejected_without_write_and_session_recovers(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """dict-in-dict secret → isError, field named, no echo, no row, same
+        session still captures."""
+        episode = {**EPISODE, "state_at_encoding": {"mood": {"note": f"leak {SECRET} here"}}}
+        async with client as session:
+            result = await session.call_tool("memory_capture_episode", episode)
+            assert isinstance(result, CallToolResult)
+            assert result.is_error is True
+            block = result.content[0]
+            assert isinstance(block, TextContent)
+            error_text = block.text
+            assert "state_at_encoding" in error_text
+            assert SECRET not in error_text
+
+            episode_id = await _capture(session, EPISODE)
+
+        count = db.execute("SELECT count(*) AS n FROM episodes").fetchone()
+        assert count is not None and count["n"] == 1
+        assert episode_id >= 1
+
+    @pytest.mark.parametrize(
+        "secret", [SECRET, AKIA_SECRET, JWT_SECRET], ids=["sk-", "AKIA", "jwt"]
+    )
+    async def test_secret_inside_list_value_rejected(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+        secret: str,
+    ) -> None:
+        """Strings inside list values are screened at any depth, for multiple
+        credential patterns."""
+        episode = {**EPISODE, "state_at_encoding": {"history": [f"ping {secret} failed"]}}
+        async with client as session:
+            result = await session.call_tool("memory_capture_episode", episode)
+            assert isinstance(result, CallToolResult)
+            assert result.is_error is True
+            block = result.content[0]
+            assert isinstance(block, TextContent)
+            error_text = block.text
+            assert "state_at_encoding" in error_text
+            assert secret not in error_text
+
+        count = db.execute("SELECT count(*) AS n FROM episodes").fetchone()
+        assert count is not None and count["n"] == 0
+
+    async def test_deep_clean_state_round_trips(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Numbers/bools/None/lists nested at depth pass the screen unchanged."""
+        state = {
+            "mood": "focused",
+            "confidence": 0.8,
+            "flags": {"caffeinated": True, "interrupted": False},
+            "stack": [{"depth": 3, "labels": ["a", "b"]}, "tail"],
+            "absent": None,
+        }
+        async with client as session:
+            episode_id = await _capture(session, {**EPISODE, "state_at_encoding": state})
+        row = db.execute(
+            "SELECT state_at_encoding FROM episodes WHERE id = %(id)s", {"id": episode_id}
+        ).fetchone()
+        assert row is not None
+        assert row["state_at_encoding"] == state
 
 
 async def test_backdate_shifts_created_at(

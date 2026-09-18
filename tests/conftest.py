@@ -26,6 +26,7 @@ from psycopg import sql
 from psycopg.rows import DictRow
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.types import Implementation
 from testcontainers.community.postgres import PostgresContainer
 
 import agent_memory.db as agent_db
@@ -49,6 +50,12 @@ def pg() -> Iterator[str]:
     with PostgresContainer("pgvector/pgvector:pg16") as container:
         url = container.get_connection_url(driver=None)
         os.environ["DATABASE_URL"] = url
+        # Issue #6: migrate()'s claim-embedding backfill embeds through
+        # load_embedder(get_settings()); the in-process settings must use the
+        # same fake embedder and dim as the spawned server subprocess, or the
+        # backfill would download the local model into an 8-dim column.
+        os.environ["EMBED_IMPL"] = "fake"
+        os.environ["PGVECTOR_DIM"] = "8"
         get_settings.cache_clear()  # this process must now see the container URL
         agent_db.migrate(dim=8)
         elapsed = (datetime.now(tz=timezone.utc) - started).total_seconds()
@@ -108,7 +115,13 @@ def client(
         try:
             async with stdio_client(parameters) as (read_stream, write_stream):
                 async with ClientSession(
-                    read_stream, write_stream, read_timeout_seconds=60.0
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=60.0,
+                    # Issue #4: the shared fixture session presents as the
+                    # generic "default" client so the clientInfo-derived
+                    # namespace stays default@local for every existing test.
+                    client_info=Implementation(name="default", version="0.0.0"),
                 ) as session:
                     await session.initialize()
                     yield session

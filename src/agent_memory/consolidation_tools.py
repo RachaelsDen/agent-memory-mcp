@@ -3,10 +3,12 @@
 Owns the age-eligible episode pools and greedy scan clustering
 (``memory_consolidate_scan``, §8 step 1), the lesson write pipeline
 (``memory_write_lesson``, §8 step 3): server-owned seed confidence, the
-per-namespace duplicate-claim guard with its replacement-lineage exemption,
-and the similar/contradicts/refines link writes — and the evidence moves
-(``memory_corroborate`` / ``memory_contradict``, §8 step 4): novelty-scaled
-confidence transitions executed atomically under the lesson row lock.
+per-namespace duplicate-claim guard — a claim-identity bar with its
+replacement-lineage exemption, composite cosine driving similar links only
+(Issue #6) — and the similar/contradicts/refines link writes — and the
+evidence moves (``memory_corroborate`` / ``memory_contradict``, §8 step 4):
+novelty-scaled confidence transitions executed atomically under the lesson
+row lock.
 
 SIZE_OK by plan contract: tasks 9-11 deliberately share this one module
 (scan + write + evidence moves); the scan portion is frozen and later
@@ -56,6 +58,7 @@ from agent_memory.consolidate import (
 )
 from agent_memory.embed import load_embedder
 from agent_memory.secrets import screen_secrets
+from agent_memory.session_state import resolve_namespace
 
 POOLS = ("fresh", "all")
 
@@ -156,7 +159,7 @@ def consolidate_scan(
     """Read-only consolidation scan; kwargs mirror the tool signature verbatim."""
     if pool not in POOLS:
         raise ToolError(f"invalid pool {pool!r}; expected 'fresh' or 'all'")
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     pool_sql = FRESH_POOL_SQL if pool == "fresh" else ALL_POOL_SQL
     episode_bind = {"ns": effective_ns, "min_age_h": settings.CONSOLIDATE_MIN_AGE_H}
 
@@ -220,11 +223,15 @@ def consolidate_scan(
 
 # --- write pipeline (memory_write_lesson, §8 step 3) ------------------------
 
-# Serialized guard+insert per namespace: the xact lock is taken INSIDE the
-# transaction so two hosts racing near-identical claims on the shared DB
-# cannot both pass the guard. The namespace crosses as a psycopg bind
-# parameter — written as a bare identifier it would be an unbound column
-# reference with no relation in scope and the statement would fail.
+# Serialized heal+guard+insert per namespace, ONE lock window: the xact
+# lock is taken INSIDE the transaction so two hosts racing near-identical
+# claims on the shared DB cannot both pass the guard, and heal -> fetch ->
+# guard-eval -> insert all happen under that single lock — an old-server
+# writer can never slip a NULL-claim lesson between the heal and the guard
+# (the guard's .to_list() would crash on it). The namespace crosses as a
+# psycopg bind parameter — written as a bare identifier it would be an
+# unbound column reference with no relation in scope and the statement
+# would fail.
 LESSON_WRITE_LOCK_SQL = """
     SELECT pg_advisory_xact_lock(hashtext('agent-memory-lesson-write:' || %(ns)s))
 """
@@ -235,8 +242,16 @@ EVIDENCE_EPISODES_SQL = """
     WHERE id = ANY(%(ids)s)
 """
 
+# Active-only candidates (promotion_status = 'active'): demoted copies are
+# invisible to retrieval, so they must not block write_lesson via duplicate-claim
+# guard nor receive similar links.
 NAMESPACE_LESSONS_SQL = """
-    SELECT id, embedding FROM lessons WHERE namespace = %(ns)s
+    SELECT id, claim, embedding, claim_embedding FROM lessons
+    WHERE namespace = %(ns)s AND promotion_status = 'active'
+"""
+
+HEAL_CLAIM_EMBEDDING_SQL = """
+    UPDATE lessons SET claim_embedding = %(claim_embedding)s WHERE id = %(id)s
 """
 
 REPLACEMENT_TARGET_SQL = """
@@ -263,10 +278,11 @@ LINEAGE_SQL = """
 INSERT_LESSON_SQL = """
     INSERT INTO lessons (
         namespace, claim, because, holds_when, fails_when, confidence,
-        last_evidence_at, updated_at, embedding
+        last_evidence_at, updated_at, embedding, claim_embedding
     ) VALUES (
         %(namespace)s, %(claim)s, %(because)s, %(holds_when)s, %(fails_when)s,
-        %(confidence)s, %(last_evidence_at)s, now(), %(embedding)s
+        %(confidence)s, %(last_evidence_at)s, now(), %(embedding)s,
+        %(claim_embedding)s
     )
     RETURNING id
 """
@@ -343,7 +359,7 @@ def write_lesson(
     """Write one drafted lesson + evidence edges + links; kwargs mirror the tool."""
     edges = _parse_evidence(evidence)
     screen_secrets(reason=[edge.reason for edge in edges])
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     if effective_ns == "global":
         # DESIGN §11: global lessons are created ONLY by memory_promote's
         # copy-with-provenance insert; a direct write would land a global row
@@ -353,12 +369,45 @@ def write_lesson(
             "by memory_promote (copy with provenance, DESIGN §11); write the "
             "lesson in its own namespace and promote it instead"
         )
-    vector = load_embedder(settings).embed([f"{claim} {because} {holds_when}"])[0]
+    # Two embeddings, two jobs (Issue #6): the composite drives retrieval and
+    # similar-links; the claim alone drives the duplicate-identity guard.
+    composite_vector, claim_vector = load_embedder(settings).embed(
+        [f"{claim} {because} {holds_when}", claim]
+    )
 
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
+        # ONE lock window (round-4 review): heal -> fetch -> guard-eval ->
+        # insert inside a single transaction, so an old-server writer can
+        # never insert a NULL-claim lesson between the heal and the guard
+        # (the guard's .to_list() would crash on NULL). Rejections are
+        # verdicts raised AFTER the block — the heal commits even when the
+        # write is rejected. Only a writer inside this same xact lock could
+        # re-NULL a row after the post-heal fetch, and the lock serializes
+        # namespace writers out.
+        reject: str | None = None
+        result: dict[str, Any] | None = None
         with connection.transaction():
             connection.execute(LESSON_WRITE_LOCK_SQL, {"ns": effective_ns})
+
+            heal_candidates = connection.execute(
+                NAMESPACE_LESSONS_SQL, {"ns": effective_ns}
+            ).fetchall()
+            unhealed = [
+                row for row in heal_candidates if row["claim_embedding"] is None
+            ]
+            if unhealed:
+                healed_vectors = load_embedder(settings).embed(
+                    [row["claim"] for row in unhealed]
+                )
+                for row, vec in zip(unhealed, healed_vectors):
+                    connection.execute(
+                        HEAL_CLAIM_EMBEDDING_SQL,
+                        {
+                            "id": row["id"],
+                            "claim_embedding": pgvector.Vector(vec),
+                        },
+                    )
 
             episode_rows = connection.execute(
                 EVIDENCE_EPISODES_SQL,
@@ -369,137 +418,171 @@ def write_lesson(
                 edge.episode_id for edge in edges if edge.episode_id not in episodes
             )
             if missing:
-                raise ToolError(f"evidence cites nonexistent episode ids: {missing}")
+                reject = f"evidence cites nonexistent episode ids: {missing}"
 
             exempt: set[int] = set()
-            if replaces_disputed is not None:
+            if reject is None and replaces_disputed is not None:
                 target = connection.execute(
                     REPLACEMENT_TARGET_SQL, {"id": replaces_disputed}
                 ).fetchone()
                 if target is None:
-                    raise ToolError(
+                    reject = (
                         f"replaces_disputed lesson {replaces_disputed} does not exist"
                     )
-                if not target["disputed"]:
-                    raise ToolError(
+                elif not target["disputed"]:
+                    reject = (
                         f"replaces_disputed lesson {replaces_disputed} is not disputed"
                     )
-                if target["namespace"] != effective_ns:
-                    raise ToolError(
+                elif target["namespace"] != effective_ns:
+                    reject = (
                         f"replaces_disputed lesson {replaces_disputed} is in "
                         f"namespace {target['namespace']!r}, not {effective_ns!r}"
                     )
-                exempt = {
-                    int(row["id"])
-                    for row in connection.execute(
-                        LINEAGE_SQL, {"root": replaces_disputed, "ns": effective_ns}
-                    )
-                }
+                else:
+                    exempt = {
+                        int(row["id"])
+                        for row in connection.execute(
+                            LINEAGE_SQL,
+                            {"root": replaces_disputed, "ns": effective_ns},
+                        )
+                    }
 
+            # Post-heal fetch: every claim_embedding is comparable here, so
+            # no .to_list() below can see NULL.
             existing = connection.execute(
                 NAMESPACE_LESSONS_SQL, {"ns": effective_ns}
             ).fetchall()
-            similarities = [
-                (int(row["id"]), _cosine(vector, row["embedding"].to_list()))
-                for row in existing
-            ]
-            for lesson_pk, cosine in similarities:
-                if lesson_pk not in exempt and cosine > settings.DUP_CLAIM_COS:
-                    raise ToolError(
-                        f"duplicate claim: cosine {cosine:.3f} to lesson "
-                        f"{lesson_pk} in namespace {effective_ns!r} exceeds "
-                        f"DUP_CLAIM_COS={settings.DUP_CLAIM_COS}; supersede it "
-                        "via replaces_disputed on a disputed lesson instead"
+            if reject is None:
+                # The rejection bar is claim identity over the now-complete
+                # set; the composite cosine feeds similar-links ONLY
+                # (Issue #6): identical rationale under a different claim
+                # links, never rejects.
+                for row in existing:
+                    lesson_pk = int(row["id"])
+                    if lesson_pk in exempt:
+                        continue
+                    claim_cosine = _cosine(
+                        claim_vector, row["claim_embedding"].to_list()
                     )
-
-            seeding_rows = [
-                episodes[edge.episode_id]
-                for edge in edges
-                if edge.relation in _SEEDING_RELATIONS
-            ]
-            incidents = collapse_incidents(
-                [
-                    Episode(
-                        id=int(row["id"]),
-                        namespace=row["namespace"],
-                        created_at=row["created_at"],
-                        embedding=tuple(row["embedding"].to_list()),
-                    )
-                    for row in seeding_rows
-                ],
-                settings.DEDUP_COS,
-                settings.DEDUP_WINDOW_H,
-            )
-            confidence = seed_confidence(
-                len(incidents),
-                diversity([row["created_at"] for row in seeding_rows]),
-            )
-
-            lesson_row = connection.execute(
-                INSERT_LESSON_SQL,
-                {
-                    "namespace": effective_ns,
-                    "claim": claim,
-                    "because": because,
-                    "holds_when": holds_when,
-                    "fails_when": fails_when,
-                    "confidence": confidence,
-                    "last_evidence_at": max(row["created_at"] for row in episode_rows),
-                    "embedding": pgvector.Vector(vector),
-                },
-            ).fetchone()
-            assert lesson_row is not None  # INSERT ... RETURNING yields one row
-            lesson_id = int(lesson_row["id"])
-            for edge in edges:
-                connection.execute(
-                    INSERT_EVIDENCE_SQL,
-                    {
-                        "lesson_id": lesson_id,
-                        "episode_id": edge.episode_id,
-                        "relation": edge.relation,
-                        "reason": edge.reason,
-                    },
-                )
-            for lesson_pk, cosine in similarities:
-                if cosine > settings.SIMILAR_LINK_COS:
-                    for from_id, to_id in ((lesson_id, lesson_pk), (lesson_pk, lesson_id)):
-                        connection.execute(
-                            INSERT_LINK_SQL,
-                            {
-                                "from_id": from_id,
-                                "to_id": to_id,
-                                "kind": "similar",
-                                "weight": cosine,
-                            },
+                    if claim_cosine > settings.DUP_CLAIM_COS:
+                        reject = (
+                            f"duplicate claim: claim cosine {claim_cosine:.3f} to "
+                            f"lesson {lesson_pk} in namespace {effective_ns!r} "
+                            f"exceeds DUP_CLAIM_COS={settings.DUP_CLAIM_COS}; "
+                            "supersede it via replaces_disputed on a disputed "
+                            "lesson instead"
                         )
-            if contradicts is not None:
+                        break
+
+            if reject is None and contradicts is not None:
                 opponent = connection.execute(
                     "SELECT id FROM lessons WHERE id = %(id)s", {"id": contradicts}
                 ).fetchone()
                 if opponent is None:
-                    raise ToolError(f"contradicts lesson {contradicts} does not exist")
-                connection.execute(
-                    INSERT_LINK_SQL,
-                    {
-                        "from_id": lesson_id,
-                        "to_id": contradicts,
-                        "kind": "contradicts",
-                        "weight": 0.5,
-                    },
+                    reject = f"contradicts lesson {contradicts} does not exist"
+
+            if reject is None:
+                similarities = [
+                    (
+                        int(row["id"]),
+                        _cosine(composite_vector, row["embedding"].to_list()),
+                    )
+                    for row in existing
+                ]
+                seeding_rows = [
+                    episodes[edge.episode_id]
+                    for edge in edges
+                    if edge.relation in _SEEDING_RELATIONS
+                ]
+                incidents = collapse_incidents(
+                    [
+                        Episode(
+                            id=int(row["id"]),
+                            namespace=row["namespace"],
+                            created_at=row["created_at"],
+                            embedding=tuple(row["embedding"].to_list()),
+                        )
+                        for row in seeding_rows
+                    ],
+                    settings.DEDUP_COS,
+                    settings.DEDUP_WINDOW_H,
                 )
-            if replaces_disputed is not None:
-                connection.execute(
-                    INSERT_LINK_SQL,
-                    {
-                        "from_id": lesson_id,
-                        "to_id": replaces_disputed,
-                        "kind": "refines",
-                        "weight": 0.5,
-                    },
+                confidence = seed_confidence(
+                    len(incidents),
+                    diversity([row["created_at"] for row in seeding_rows]),
                 )
+
+                lesson_row = connection.execute(
+                    INSERT_LESSON_SQL,
+                    {
+                        "namespace": effective_ns,
+                        "claim": claim,
+                        "because": because,
+                        "holds_when": holds_when,
+                        "fails_when": fails_when,
+                        "confidence": confidence,
+                        "last_evidence_at": max(
+                            row["created_at"] for row in episode_rows
+                        ),
+                        "embedding": pgvector.Vector(composite_vector),
+                        "claim_embedding": pgvector.Vector(claim_vector),
+                    },
+                ).fetchone()
+                assert lesson_row is not None  # INSERT ... RETURNING yields one row
+                lesson_id = int(lesson_row["id"])
+                for edge in edges:
+                    connection.execute(
+                        INSERT_EVIDENCE_SQL,
+                        {
+                            "lesson_id": lesson_id,
+                            "episode_id": edge.episode_id,
+                            "relation": edge.relation,
+                            "reason": edge.reason,
+                        },
+                    )
+                for lesson_pk, cosine in similarities:
+                    if cosine > settings.SIMILAR_LINK_COS:
+                        for from_id, to_id in (
+                            (lesson_id, lesson_pk),
+                            (lesson_pk, lesson_id),
+                        ):
+                            connection.execute(
+                                INSERT_LINK_SQL,
+                                {
+                                    "from_id": from_id,
+                                    "to_id": to_id,
+                                    "kind": "similar",
+                                    "weight": cosine,
+                                },
+                            )
+                if contradicts is not None:
+                    connection.execute(
+                        INSERT_LINK_SQL,
+                        {
+                            "from_id": lesson_id,
+                            "to_id": contradicts,
+                            "kind": "contradicts",
+                            "weight": 0.5,
+                        },
+                    )
+                if replaces_disputed is not None:
+                    connection.execute(
+                        INSERT_LINK_SQL,
+                        {
+                            "from_id": lesson_id,
+                            "to_id": replaces_disputed,
+                            "kind": "refines",
+                            "weight": 0.5,
+                        },
+                    )
+                result = {"lesson_id": lesson_id, "seed_confidence": confidence}
+
+        if reject is not None:
+            raise ToolError(reject)
+        assert result is not None  # clean verdict => the insert path ran
     finally:
         connection.close()
-    return {"lesson_id": lesson_id, "seed_confidence": confidence}
+    return result
 
 
 # --- evidence-move pipeline (memory_corroborate / memory_contradict, §8 step 4)

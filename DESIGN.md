@@ -1,6 +1,8 @@
 # Agent Memory — MCP Memory Server
 
-**Status:** Draft v0.2 — review-approved, implementation-ready · **Date:** 2026-09-15 · **Implementation:** Python · **Interface:** MCP server (stdio)
+**Status:** Draft v0.3 — implementation-synced · **Date:** 2026-09-18 · **Implementation:** Python · **Interface:** MCP server (stdio)
+
+**v0.2 → v0.3:** session-scoped namespace + clientInfo default; screening scope; implementation-sync details below.
 
 ---
 
@@ -62,7 +64,7 @@ flowchart LR
     subgraph Server ["agent-memory-mcp (Python, stdio)"]
         T1[tools: capture / probe / report_usage]
         T2[tools: consolidate scan / write_lesson]
-        T3[tools: digest / dispute / stats]
+        T3[tools: digest / dispute / stats / session-ns]
         R[retrieve.py — hybrid RRF + scoring + spreading activation]
         E[embed.py — local sentence-transformers, pluggable]
     end
@@ -83,7 +85,8 @@ flowchart LR
 - **Transport:** stdio (MCP default). One server process per host; all processes share one Postgres.
 - **Embeddings:** local `sentence-transformers` by default (`all-MiniLM-L6-v2`, 384 dims). Pluggable
   via an `Embedder` protocol; dimension is config, schema is generated to match.
-- **Stack:** `mcp` official SDK (`MCPServer`, `@mcp.tool()`, `mcp.run()` → stdio), `psycopg[binary]`
+- **Stack:** `mcp` official SDK ≥ 2.2.0 (`MCPServer`, `@mcp.tool()`, `mcp.run()` → stdio;
+  middleware seam for clientInfo), `psycopg[binary]`
   v3 + `pgvector`, `pytest` + testcontainers-postgres.
 
 ---
@@ -320,9 +323,13 @@ or by cron via the CLI entrypoint.
    fails_when — citing which episodes support them. Where episodes within a cluster conflict, it
    writes **two** lessons (P9) and names the contradiction.
 3. **Write:** `memory_write_lesson` stores the lesson and one `support`/`refine` evidence edge per
-   cited episode — the edges *are* the consolidation, no flag to set — computes `similar` links to
-   existing lessons (cosine > 0.75), rejects near-duplicate claims (claim cosine > 0.95 to an
-   existing lesson in the namespace; episodes may be reused, lessons may not), and the **server**
+   cited episode — the edges *are* the consolidation, no flag to set — and guards duplicates on
+   two thresholds: the claim alone is embedded, and a claim cosine above `DUP_CLAIM_COS` to an
+   existing lesson in the namespace is rejected as a duplicate (episodes may be reused, lessons
+   may not) unless the twin sits in the `replaces_disputed` lineage — re-derivations share their
+   claim by design, so supersession is the sanctioned verbatim path. The composite
+   `claim + because + holds_when` embedding drives retrieval and `similar` links (cosine > 0.75)
+   only: identical rationale under a different claim links, never rejects. The **server**
    seeds confidence — never the caller (P3) — via an evidence-diversity formula:
 
    ```
@@ -351,7 +358,13 @@ overwrites silently isn't memory.
 
 ## 9. MCP Tool Surface
 
-All tools implicitly scoped by `namespace` (server config; optional override param).
+Namespace-resolving tools (`memory_capture_episode`, `memory_probe`, `memory_search`,
+`memory_consolidate_scan`, `memory_write_lesson`, `memory_stats`, `memory_digest`) resolve target
+namespace via precedence: tool param > session-set > explicit settings (`MEMORY_NAMESPACE`,
+`--namespace`, or any pydantic Settings source) > clientInfo-derived default. ID-addressed tools
+(`memory_corroborate`, `memory_contradict`, `memory_promote`, `memory_demote`, `memory_dispute`,
+`memory_report_usage`) list `namespace` for signature uniformity only; the supplied IDs alone scope
+the mutation.
 
 | Tool | When the agent calls it | Signature (abridged) |
 |------|------------------------|----------------------|
@@ -367,6 +380,7 @@ All tools implicitly scoped by `namespace` (server config; optional override par
 | `memory_promote` | Human graduates a broadly useful lesson to `global` — manual-only | `(lesson_id, target_namespace='global', reason) → copies the lesson cross-namespace with `promoted_from` provenance; original preserved (§11)` |
 | `memory_demote` | Human retires a global promotion | `(lesson_id, reason) → tombstones the copy (`promotion_status='demoted'` + reason); never deletes; original untouched |
 | `memory_stats` | Curiosity / health check | counts, backlog, popular-but-shaky, rare-critical-stale, cross-cutting (episodes cited by ≥2 lessons) lists |
+| `memory_set_namespace` | At session start when project scoping should override the configured or auto-derived default | `(namespace: str) → {namespace}` — validates non-empty input and rejects `global` (promotion-only); stored for this process only (one stdio client per process), never persisted; resolution precedence is tool param > session-set > explicit settings (`MEMORY_NAMESPACE`, `--namespace`, or any pydantic Settings source) > `<sanitized clientInfo name>@local`, with `default@local` as fallback, and clientInfo derivation applies only while `MEMORY_NAMESPACE` remains at its default |
 
 **The involuntary-retrieval convention:** MCP cannot force a host to call tools. We make `memory_probe`
 cheap and document the discipline ("probe before non-trivial actions"); hosts that support system
@@ -393,8 +407,15 @@ a false memory the compressor wrote, `memory_dispute` forces re-derivation from 
 
 ## 11. Scoping & Security
 
-- **Namespace** = `MEMORY_NAMESPACE` env or `--namespace` (suggested: `<agent>@<project-path-hash>`).
-  Memories from one project never pollute another; same agent+project across hosts converges.
+- **Namespace** defaults to `<sanitized clientInfo name>@local` (or `default@local` without usable
+  clientInfo) when `MEMORY_NAMESPACE` is left at its default. Resolution precedence is per-tool
+  `namespace` > session-set > explicit settings (`MEMORY_NAMESPACE`, `--namespace`, or any pydantic
+  Settings source) > clientInfo-derived default. Suggested project override:
+  `<agent>@<project-path-hash>`. `memory_set_namespace` sets the session tier for the process
+  lifetime. With per-project namespaces (override or `memory_set_namespace`), projects are
+  isolated; the zero-config clientInfo default scopes by agent identity (`<client>@local`) shared
+  across that agent's projects — cross-project isolation requires the project pinning documented in
+  the README; same agent+project across hosts converges.
 - **Global namespace — manual promotion only.** `memory_promote` copies a lesson into namespace
   `global` with `promoted_from_lesson_id` provenance and the human's `reason`; the original project
   lesson stays where it is (copy, never move), with `promotion_reason`, `promoted_at`, and
@@ -403,12 +424,21 @@ a false memory the compressor wrote, `memory_dispute` forces re-derivation from 
   `promotion_status='active'`. No automatic graduation exists, by design: one project producing a
   convincing-looking pattern is exactly how global memory gets contaminated. The promoted copy's
   confidence evolves *independently*, from cross-project corroboration — global trust must be earned
-  globally. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
+  globally. Promotion enforces the target namespace's claim-identity bar (a claim already graduated
+  cannot be duplicated; corroborate the existing lesson instead) and heals a missing source claim
+  embedding at copy time. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
   + `demotion_reason`, and the record stays queryable — months later, "why did the agent trust X in
   March?" must be answerable from the data, not reconstructed from its absence. The original
   project lesson is untouched throughout.
-- **No secrets** — capture tooling rejects obvious token/key patterns (best-effort regex screen at
-  write time; flagged, not stored).
+- **No secrets** — a best-effort regex screen rejects obvious token/key patterns at capture across
+  text fields (`goal`, `expectation`, `action`, `outcome`, `raw_text`, `tags`) and in the reason
+  fields of dispute, demote, promote, write-lesson evidence, corroborate, and contradict.
+  `state_at_encoding` (arbitrary JSON context, stored for audit, never embedded or matched per P4)
+  is screened recursively alongside the six text fields: every string value in the JSON, at any
+  depth of dict/list nesting, is checked against the same pattern list, while non-string scalars
+  pass through unchecked. A defense-in-depth scan rejects the rendered digest before it reaches
+  `DIGEST_DIR`. Lesson body fields (`claim`, `because`, `holds_when`, `fails_when`) are
+  deliberately unscreened because they derive from screened episodes and host authorship.
 - **Local-first:** default embedder is local; no data leaves the machine. Remote embedders are opt-in.
 - **Trust boundary:** lessons are agent-authored claims about the world. Hosts should treat probe
   results as advisory context, never as instructions (prompt-injection surface considered; digest

@@ -1,4 +1,4 @@
-"""Task-15 entrypoint contract: 13 tools over the REAL ``python -m agent_memory``
+"""Task-15 entrypoint contract: 14 tools over the REAL ``python -m agent_memory``
 path, generated inputSchema integrity, and the CLI subcommands.
 
 Every client test spawns the real dispatcher (``python -m agent_memory``, no
@@ -47,6 +47,7 @@ EXPECTED_TOOLS = frozenset(
         "memory_dispute",
         "memory_digest",
         "memory_stats",
+        "memory_set_namespace",
     }
 )
 
@@ -57,6 +58,8 @@ REQUIRED_BY_TOOL: dict[str, set[str]] = {
     "memory_promote": {"lesson_id", "reason"},
     "memory_demote": {"lesson_id", "reason"},
     "memory_dispute": {"lesson_id", "reason"},
+    # Issue #4: the setter's namespace param IS its purpose, so it is required
+    "memory_set_namespace": {"namespace"},
 }
 
 CLI_ENV_NAMESPACE = "env-ns@proj"
@@ -147,10 +150,10 @@ def _insert_episode(
     return int(row["id"])
 
 
-async def test_list_tools_exactly_thirteen(
+async def test_list_tools_exactly_fourteen(
     db: psycopg.Connection[DictRow], client: AbstractAsyncContextManager[ClientSession]
 ) -> None:
-    """The REAL entrypoint serves exactly the 13 plan tools — no extras, none
+    """The REAL entrypoint serves exactly the 14 plan tools — no extras, none
     missing (set equality, not a subset check)."""
     async with client as session:
         listing = await session.list_tools()
@@ -172,7 +175,10 @@ async def test_every_input_schema_parses_and_marks_required(
         schema: dict[str, Any] = json.loads(json.dumps(tool.input_schema))
         assert schema["type"] == "object"
         assert "namespace" in schema["properties"]
-        assert "namespace" not in schema.get("required", [])
+        # memory_set_namespace's namespace param is REQUIRED — it is the
+        # tool's purpose; every other tool keeps it optional.
+        if tool.name != "memory_set_namespace":
+            assert "namespace" not in schema.get("required", [])
         schemas[tool.name] = schema
     for name, expected_required in REQUIRED_BY_TOOL.items():
         assert set(schemas[name].get("required", [])) == expected_required, name
