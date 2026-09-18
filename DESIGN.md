@@ -424,7 +424,9 @@ a false memory the compressor wrote, `memory_dispute` forces re-derivation from 
   `promotion_status='active'`. No automatic graduation exists, by design: one project producing a
   convincing-looking pattern is exactly how global memory gets contaminated. The promoted copy's
   confidence evolves *independently*, from cross-project corroboration — global trust must be earned
-  globally. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
+  globally. Promotion enforces the target namespace's claim-identity bar (a claim already graduated
+  cannot be duplicated; corroborate the existing lesson instead) and heals a missing source claim
+  embedding at copy time. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
   + `demotion_reason`, and the record stays queryable — months later, "why did the agent trust X in
   March?" must be answerable from the data, not reconstructed from its absence. The original
   project lesson is untouched throughout.

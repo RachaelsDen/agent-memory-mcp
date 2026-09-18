@@ -306,9 +306,13 @@ def create_server() -> MCPServer:
         fails_when, the same embedding, and the source's confidence, while
         its usage stats reset to zero. All evidence edges are copied to the
         same episode ids. The original row is untouched (copy, never move);
-        promoting into the lesson's own namespace is an error. namespace is
-        accepted per the every-tool contract; the lesson_id alone scopes the
-        source. Returns {"promoted_lesson_id": int}.
+        promoting into the lesson's own namespace is an error. Promotion
+        enforces the target namespace's claim-identity bar — a claim
+        already graduated into the target is rejected (corroborate the
+        existing lesson instead) — and heals a source whose claim embedding
+        is missing at copy time. namespace is accepted per the every-tool
+        contract; the lesson_id alone scopes the source. Returns
+        {"promoted_lesson_id": int}.
         """
         return promote(
             lesson_id=lesson_id,

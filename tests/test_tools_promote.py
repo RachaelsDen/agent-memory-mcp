@@ -512,6 +512,163 @@ class TestPromoteRejectsSameNamespace:
             assert _count(db, "lessons") == lessons_before
 
 
+class TestPromoteClaimIdentityBar:
+    """Review fix: promotion heals a NULL source claim_embedding (rolling
+    upgrade / interrupted 003 backfill) and holds the TARGET namespace's
+    claim-identity bar — no lineage exemption, message distinct from
+    write_lesson's supersede guidance."""
+
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return {LESSON_TEXT: V_L}
+
+    async def test_null_claim_embedding_source_healed_in_copy_and_source(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        ep_target = _insert_episode(
+            db, goal="evidence for the target-namespace write", embedding=V_L, at=DAY_1
+        )
+        async with client as session:
+            # Pre-003-style fixture seeded INSIDE the live session (direct
+            # SQL, claim_embedding left NULL — F4 precedent, write_lesson
+            # cannot produce this state): serve() runs migrate() on every
+            # startup and its backfill would heal a NULL row BEFORE the
+            # promote, so the row must appear only after the server is up —
+            # otherwise this test would exercise the backfill, not the
+            # promote-time heal.
+            seeded = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding)
+                VALUES (%(namespace)s, %(claim)s, %(because)s, %(embedding)s)
+                RETURNING id
+                """,
+                {
+                    "namespace": DEFAULT_NS,
+                    "claim": CLAIM,
+                    "because": BECAUSE,
+                    "embedding": pgvector.Vector(V_L),
+                },
+            ).fetchone()
+            assert seeded is not None
+            lesson_id = int(seeded["id"])
+            payload = _ok(
+                await _promote(
+                    session,
+                    lesson_id,
+                    reason="graduate the unbackfilled row",
+                    target_namespace=THIRD_NS,
+                )
+            )
+            copy_id = int(payload["promoted_lesson_id"])
+
+            # The fake embedder hashes CLAIM deterministically, so copy and
+            # healed source carry the SAME vector (distance 0), and both are
+            # non-NULL — asserted SQL-side.
+            heal_row = db.execute(
+                """
+                SELECT s.claim_embedding IS NOT NULL AS source_healed,
+                       c.claim_embedding IS NOT NULL AS copy_has_claim_embedding,
+                       (c.claim_embedding <=> s.claim_embedding) AS claim_dist
+                FROM lessons c, lessons s
+                WHERE c.id = %(copy)s AND s.id = %(src)s
+                """,
+                {"copy": copy_id, "src": lesson_id},
+            ).fetchone()
+            assert heal_row is not None
+            assert heal_row["source_healed"] is True
+            assert heal_row["copy_has_claim_embedding"] is True
+            assert heal_row["claim_dist"] == pytest.approx(0.0)
+
+            # The healed copy carries real claim identity: a verbatim
+            # write_lesson in the TARGET now trips write_lesson's own guard.
+            error = _err(
+                await session.call_tool(
+                    "memory_write_lesson",
+                    {
+                        "claim": CLAIM,
+                        "because": "different rationale, same rule",
+                        "evidence": [{"episode_id": ep_target, "relation": "support"}],
+                        "namespace": THIRD_NS,
+                    },
+                )
+            )
+            assert "duplicate" in error
+
+    async def test_same_claim_two_namespaces_second_graduation_rejected(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        ep_support = _insert_episode(
+            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
+        )
+        async with client as session:
+            alpha = await _write(
+                session,
+                evidence=[{"episode_id": ep_support, "relation": "support"}],
+                namespace="alpha@proj",
+            )
+            beta = await _write(
+                session,
+                evidence=[{"episode_id": ep_support, "relation": "support"}],
+                namespace="beta@proj",
+            )
+            alpha_id = int(alpha["lesson_id"])
+            beta_id = int(beta["lesson_id"])
+
+            payload = _ok(await _promote(session, alpha_id, reason="first graduation"))
+            copy_id = int(payload["promoted_lesson_id"])
+
+            error = _err(await _promote(session, beta_id, reason="second graduation"))
+            assert "already graduated" in error
+            assert "corroborate" in error
+            assert f"lesson {copy_id}" in error
+            assert "supersede" not in error  # distinct from write_lesson's bar
+
+        # First copy intact; the rejected graduation wrote nothing.
+        copy = _lesson_row(db, copy_id)
+        assert copy["namespace"] == GLOBAL
+        assert copy["claim"] == CLAIM
+        assert copy["promotion_status"] == "active"
+        assert copy["promoted_from_lesson_id"] == alpha_id
+        assert _count(db, "lessons") == 3  # alpha, beta, one global copy
+
+    async def test_write_then_promote_into_occupied_global_rejected(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        ep_support = _insert_episode(
+            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
+        )
+        async with client as session:
+            written = await _write(
+                session, evidence=[{"episode_id": ep_support, "relation": "support"}]
+            )
+            lesson_id = int(written["lesson_id"])
+            # Occupy global with the SAME claim identity via SQL (F4:
+            # write_lesson rejects global) — cloning the written row's
+            # vectors, so the seat is held by a non-promotion lesson and the
+            # bar is proven lineage-blind.
+            seeded = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding, claim_embedding)
+                SELECT 'global', claim, because, embedding, claim_embedding
+                FROM lessons WHERE id = %(id)s
+                RETURNING id
+                """,
+                {"id": lesson_id},
+            ).fetchone()
+            assert seeded is not None
+
+            error = _err(await _promote(session, lesson_id, reason="graduate"))
+            assert "already graduated" in error
+            assert "corroborate" in error
+        assert _count(db, "lessons") == 2  # written + seeded seat; no copy
+
+
 class TestDemoteValidation:
     """Demote requires a promotion; anything else is an MCP error result."""
 
