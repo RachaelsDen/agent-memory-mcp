@@ -1,5 +1,7 @@
 """Pluggable embedders: local sentence-transformers and a deterministic fake (DESIGN §4, §12)."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import math
