@@ -142,12 +142,13 @@ def promote(
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
         with connection.transaction():
-            source = connection.execute(
-                PROMOTE_SOURCE_SQL, {"id": lesson_id}
+            source_info = connection.execute(
+                "SELECT namespace FROM lessons WHERE id = %(id)s", {"id": lesson_id}
             ).fetchone()
-            if source is None:
+            if source_info is None:
                 raise ToolError(f"lesson {lesson_id} does not exist")
-            if source["namespace"] == target_namespace:
+            source_ns = source_info["namespace"]
+            if source_ns == target_namespace:
                 raise ToolError(
                     f"lesson {lesson_id} is already in namespace "
                     f"{target_namespace!r}; promotion copies into a different "
@@ -155,8 +156,17 @@ def promote(
                 )
             # LESSON_WRITE_LOCK_SQL is imported, not mirrored: the lock key
             # must stay byte-identical to write_lesson's or promotion stops
-            # serializing against writes on the target namespace.
-            connection.execute(LESSON_WRITE_LOCK_SQL, {"ns": target_namespace})
+            # serializing against writes. Deterministic lock ordering on BOTH
+            # namespaces in lexicographical order prevents deadlock cycles
+            # between concurrent opposite-direction promotions (e.g. A->B vs B->A).
+            for ns in sorted(set([source_ns, target_namespace])):
+                connection.execute(LESSON_WRITE_LOCK_SQL, {"ns": ns})
+
+            source = connection.execute(
+                PROMOTE_SOURCE_SQL, {"id": lesson_id}
+            ).fetchone()
+            if source is None:
+                raise ToolError(f"lesson {lesson_id} does not exist")
 
             # A NULL source claim_embedding (interrupted 003 backfill) would
             # copy guard-blind; compute it through the serve embedder and

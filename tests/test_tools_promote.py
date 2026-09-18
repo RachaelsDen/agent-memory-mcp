@@ -19,6 +19,7 @@ carry --durations=10 for the hung-command class.
 """
 
 import json
+import threading
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -30,6 +31,7 @@ from mcp import ClientSession
 from mcp.types import CallToolResult, TextContent
 from psycopg.rows import DictRow
 
+from agent_memory.promotion import promote
 from tests.conftest import backdate
 from agent_memory.embed import FakeEmbedder
 
@@ -934,3 +936,79 @@ class TestReasonSecretScreen:
 
             demoted = _ok(await _demote(session, copy_id, reason="stale globally"))
         assert demoted == {"lesson_id": copy_id, "promotion_status": "demoted"}
+
+
+class TestConcurrentPromotions:
+    """Opposite-direction promotions acquire advisory locks deterministically to avoid deadlocks."""
+
+    def test_opposite_direction_promotion_concurrency_no_deadlock(
+        self,
+        db: psycopg.Connection[DictRow],
+    ) -> None:
+        ns_a = "ns-alpha"
+        ns_b = "ns-beta"
+
+        row_a = db.execute(
+            """
+            INSERT INTO lessons (namespace, claim, because, embedding, confidence)
+            VALUES (%(ns)s, 'claim A in alpha', 'because A', %(vec)s, 0.5)
+            RETURNING id
+            """,
+            {"ns": ns_a, "vec": pgvector.Vector(V_L)},
+        ).fetchone()
+        assert row_a is not None
+        id_a = int(row_a["id"])
+
+        row_b = db.execute(
+            """
+            INSERT INTO lessons (namespace, claim, because, embedding, confidence)
+            VALUES (%(ns)s, 'claim B in beta', 'because B', %(vec)s, 0.5)
+            RETURNING id
+            """,
+            {"ns": ns_b, "vec": pgvector.Vector(V_N)},
+        ).fetchone()
+        assert row_b is not None
+        id_b = int(row_b["id"])
+
+        db.commit()
+
+        barrier = threading.Barrier(2)
+        res_a: dict[str, Any] = {}
+        res_b: dict[str, Any] = {}
+
+        def worker_a() -> None:
+            barrier.wait()
+            try:
+                res_a["result"] = promote(
+                    lesson_id=id_a, reason="promote A to B", target_namespace=ns_b
+                )
+            except Exception as e:
+                res_a["error"] = e
+
+        def worker_b() -> None:
+            barrier.wait()
+            try:
+                res_b["result"] = promote(
+                    lesson_id=id_b, reason="promote B to A", target_namespace=ns_a
+                )
+            except Exception as e:
+                res_b["error"] = e
+
+        t1 = threading.Thread(target=worker_a)
+        t2 = threading.Thread(target=worker_b)
+
+        t1.start()
+        t2.start()
+
+        t1.join(timeout=10.0)
+        t2.join(timeout=10.0)
+
+        assert not t1.is_alive(), "Thread 1 timed out (deadlock?)"
+        assert not t2.is_alive(), "Thread 2 timed out (deadlock?)"
+
+        assert "error" not in res_a, f"Worker A failed with error: {res_a.get('error')}"
+        assert "error" not in res_b, f"Worker B failed with error: {res_b.get('error')}"
+
+        assert "promoted_lesson_id" in res_a["result"]
+        assert "promoted_lesson_id" in res_b["result"]
+

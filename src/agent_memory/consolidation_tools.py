@@ -242,8 +242,12 @@ EVIDENCE_EPISODES_SQL = """
     WHERE id = ANY(%(ids)s)
 """
 
+# Active-only candidates (promotion_status = 'active'): demoted copies are
+# invisible to retrieval, so they must not block write_lesson via duplicate-claim
+# guard nor receive similar links.
 NAMESPACE_LESSONS_SQL = """
-    SELECT id, claim, embedding, claim_embedding FROM lessons WHERE namespace = %(ns)s
+    SELECT id, claim, embedding, claim_embedding FROM lessons
+    WHERE namespace = %(ns)s AND promotion_status = 'active'
 """
 
 HEAL_CLAIM_EMBEDDING_SQL = """

@@ -870,6 +870,57 @@ class TestWriteLessonDupGuard:
 
         assert int(payload["lesson_id"]) > 0
 
+    async def test_write_lesson_admits_claim_when_copy_demoted(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        episode_src = _insert_episode(db, goal="src episode", namespace=DEFAULT_NS, embedding=V_Y)
+        episode_tgt = _insert_episode(db, goal="tgt episode", namespace=OTHER_NS, embedding=V_Y)
+
+        async with client as session:
+            payload1 = _ok(
+                await _write(
+                    session,
+                    claim="promoted then demoted claim",
+                    because="source cause",
+                    evidence=[{"episode_id": episode_src, "relation": "support"}],
+                    namespace=DEFAULT_NS,
+                )
+            )
+            src_id = int(payload1["lesson_id"])
+            promoted = _ok(
+                await session.call_tool(
+                    "memory_promote",
+                    {
+                        "lesson_id": src_id,
+                        "reason": "Promoting to OTHER_NS",
+                        "target_namespace": OTHER_NS,
+                    },
+                )
+            )
+            copy_id = int(promoted["promoted_lesson_id"])
+            _ok(
+                await session.call_tool(
+                    "memory_demote",
+                    {
+                        "lesson_id": copy_id,
+                        "reason": "Demoting copy in OTHER_NS",
+                    },
+                )
+            )
+            payload2 = _ok(
+                await _write(
+                    session,
+                    claim="promoted then demoted claim",
+                    because="new independent cause in OTHER_NS",
+                    evidence=[{"episode_id": episode_tgt, "relation": "support"}],
+                    namespace=OTHER_NS,
+                )
+            )
+
+        assert int(payload2["lesson_id"]) > 0
+
 
 class TestWriteLessonLinks:
     @pytest.fixture()
