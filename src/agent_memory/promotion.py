@@ -15,14 +15,17 @@ hit is an MCP error naming the field only, never the matched content.
 
 Promotion also holds the TARGET namespace's claim-identity bar: under the
 same per-namespace advisory xact lock write_lesson takes, the source's
-claim vector is compared against every non-NULL target claim embedding,
-and a cosine above DUP_CLAIM_COS rejects the graduation — a claim already
-graduated cannot be duplicated; corroborate the existing lesson instead.
-No lineage exemption applies: a promotion copy is a new-namespace row,
-not a re-derivation. A source whose claim_embedding is NULL (rolling
-upgrade / interrupted 003 backfill) is healed at copy time — the vector
-computed through load_embedder(get_settings()) (the serve dim invariant)
-is stored on BOTH the source row and the copy inside the one transaction.
+claim vector is compared against every target claim embedding — NULL
+target embeddings (old-server promotions) are healed in place under that
+same lock before the comparison, so a NULL seat cannot let a duplicate
+graduation slip past — and a cosine above DUP_CLAIM_COS rejects the
+graduation: a claim already graduated cannot be duplicated; corroborate
+the existing lesson instead. No lineage exemption applies: a promotion
+copy is a new-namespace row, not a re-derivation. A source whose
+claim_embedding is NULL (rolling upgrade / interrupted 003 backfill) is
+healed at copy time — the vector computed through
+load_embedder(get_settings()) (the serve dim invariant) is stored on BOTH
+the source row and the copy inside the one transaction.
 
 Demotion is a TOMBSTONE, never a delete: promotion_status='demoted' +
 demoted_at + demotion_reason on the copy, with the row and its evidence
@@ -91,15 +94,17 @@ COPY_EVIDENCE_SQL = """
 
 # Backfill-repair semantics: only the vector column moves (updated_at stays,
 # matching db._backfill_claim_embeddings — a storage repair, not an edit).
-HEAL_SOURCE_CLAIM_EMBEDDING_SQL = """
+# Used for both the SOURCE heal and the target-namespace heals below.
+HEAL_CLAIM_EMBEDDING_SQL = """
     UPDATE lessons SET claim_embedding = %(claim_embedding)s WHERE id = %(id)s
 """
 
-# NULL target claim embeddings carry no claim identity to compare and do
-# not block (write_lesson's bar skips them the same way).
-TARGET_CLAIM_EMBEDDINGS_SQL = """
-    SELECT id, claim_embedding FROM lessons
-    WHERE namespace = %(ns)s AND claim_embedding IS NOT NULL
+# Target rows INCLUDING NULL claim embeddings: an old-server promotion
+# creates NULL global copies, and a NOT NULL filter here would let a new
+# identical-claim graduation slip past the bar. The NULLs are healed under
+# the already-held target advisory lock before the comparison.
+TARGET_LESSONS_SQL = """
+    SELECT id, claim, claim_embedding FROM lessons WHERE namespace = %(ns)s
 """
 
 DEMOTE_SOURCE_SQL = """
@@ -126,8 +131,9 @@ def promote(
     """Copy one lesson into target_namespace; returns {"promoted_lesson_id": id}.
 
     Holds the target namespace's claim-identity bar (duplicate graduations
-    are rejected) and heals a NULL source claim_embedding in the same
-    transaction — copy and source both leave with a claim vector.
+    are rejected; NULL target claim embeddings are healed under the target
+    lock before the comparison) and heals a NULL source claim_embedding in
+    the same transaction — copy and source both leave with a claim vector.
     """
     screen_secrets(reason=reason)
     settings = get_settings()
@@ -159,7 +165,7 @@ def promote(
                     load_embedder(settings).embed([source["claim"]])[0]
                 )
                 connection.execute(
-                    HEAL_SOURCE_CLAIM_EMBEDDING_SQL,
+                    HEAL_CLAIM_EMBEDDING_SQL,
                     {"id": lesson_id, "claim_embedding": claim_embedding},
                 )
             else:
@@ -167,9 +173,31 @@ def promote(
 
             # No lineage exemption here, unlike write_lesson's bar: a
             # promotion copy is a new-namespace row, not a re-derivation.
+            # Target rows include NULL-claim ones; heal them in place under
+            # this already-held target advisory lock, then compare ALL. A
+            # rejected promotion rolls this target-heal back with the
+            # transaction — harmless: nothing was inserted, so there is no
+            # copy that needed the heal, and the next attempt (or the next
+            # admission) re-heals. write_lesson keeps its stricter
+            # raise-after-commit discipline because its heal must survive
+            # rejection; promote's heal exists only to arm this check.
             target_rows = connection.execute(
-                TARGET_CLAIM_EMBEDDINGS_SQL, {"ns": target_namespace}
+                TARGET_LESSONS_SQL, {"ns": target_namespace}
             ).fetchall()
+            unhealed_targets = [
+                row for row in target_rows if row["claim_embedding"] is None
+            ]
+            if unhealed_targets:
+                healed_vectors = load_embedder(settings).embed(
+                    [row["claim"] for row in unhealed_targets]
+                )
+                for row, vec in zip(unhealed_targets, healed_vectors):
+                    healed = pgvector.Vector(vec)
+                    connection.execute(
+                        HEAL_CLAIM_EMBEDDING_SQL,
+                        {"id": row["id"], "claim_embedding": healed},
+                    )
+                    row["claim_embedding"] = healed
             for row in target_rows:
                 cosine = _cosine(
                     claim_embedding.to_list(), row["claim_embedding"].to_list()

@@ -31,6 +31,7 @@ from mcp.types import CallToolResult, TextContent
 from psycopg.rows import DictRow
 
 from tests.conftest import backdate
+from agent_memory.embed import FakeEmbedder
 
 DIM = 8
 V_L = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # lesson + probe vector (cos 1.0)
@@ -667,6 +668,106 @@ class TestPromoteClaimIdentityBar:
             assert "already graduated" in error
             assert "corroborate" in error
         assert _count(db, "lessons") == 2  # written + seeded seat; no copy
+
+    async def test_null_claim_global_seat_rejected_then_admitted_path_heals(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Round-4 review: NULL-claim TARGET rows no longer slip past the bar.
+
+        An old-server promotion creates a global copy with NULL
+        claim_embedding; the old NOT NULL target filter excluded it, so a
+        new identical-claim graduation was ADMITTED onto the seat. The
+        fixed bar heals the seat under the target lock and compares it:
+        the identical claim is rejected, and a later distinct-claim
+        admission commits the heal.
+        """
+        ep_support = _insert_episode(
+            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
+        )
+        ep_distinct = _insert_episode(
+            db, goal="support the distinct rule", embedding=V_N, at=DAY_1
+        )
+        async with client as session:
+            # Old-server promotion artifact: NULL claim_embedding, seeded
+            # INSIDE the live session (startup migrate would backfill it
+            # earlier — same caveat as the NULL-source test above).
+            seeded = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding)
+                VALUES (%(namespace)s, %(claim)s, %(because)s, %(embedding)s)
+                RETURNING id
+                """,
+                {
+                    "namespace": GLOBAL,
+                    "claim": CLAIM,
+                    "because": BECAUSE,
+                    "embedding": pgvector.Vector(V_L),
+                },
+            ).fetchone()
+            assert seeded is not None
+            seat_id = int(seeded["id"])
+
+            written = await _write(
+                session, evidence=[{"episode_id": ep_support, "relation": "support"}]
+            )
+            lesson_id = int(written["lesson_id"])
+
+            # Identical claim onto the NULL seat: REJECTED — the pre-fix
+            # NOT NULL filter admitted this graduation (red check).
+            error = _err(await _promote(session, lesson_id, reason="graduate"))
+            assert "already graduated" in error
+            assert f"lesson {seat_id}" in error
+            assert _count(db, "lessons") == 2  # source + seat; no copy
+
+            # Accepted trade: the rejection rolled the in-tx target-heal
+            # back (nothing was inserted; the admitted path below re-heals).
+            seat = db.execute(
+                """
+                SELECT claim_embedding IS NULL AS still_null
+                FROM lessons WHERE id = %(id)s
+                """,
+                {"id": seat_id},
+            ).fetchone()
+            assert seat is not None and seat["still_null"] is True
+
+            # A distinct-claim graduation is admitted and COMMITS the heal.
+            distinct = _ok(
+                await session.call_tool(
+                    "memory_write_lesson",
+                    {
+                        "claim": "cache invalidation beats stale reads",
+                        "because": "stale caches keep serving wrong answers",
+                        "evidence": [
+                            {"episode_id": ep_distinct, "relation": "support"}
+                        ],
+                    },
+                )
+            )
+            payload = _ok(
+                await _promote(
+                    session, int(distinct["lesson_id"]), reason="distinct rule"
+                )
+            )
+            assert int(payload["promoted_lesson_id"]) > 0
+
+            healed = db.execute(
+                """
+                SELECT claim_embedding IS NOT NULL AS healed,
+                       claim_embedding <=> %(vec)s AS dist
+                FROM lessons WHERE id = %(id)s
+                """,
+                {
+                    "id": seat_id,
+                    "vec": pgvector.Vector(FakeEmbedder(dim=DIM).embed([CLAIM])[0]),
+                },
+            ).fetchone()
+            assert healed is not None
+            assert healed["healed"] is True
+            assert healed["dist"] == pytest.approx(0.0)
+            # source + NULL seat + distinct lesson + its global copy
+            assert _count(db, "lessons") == 4
 
 
 class TestDemoteValidation:

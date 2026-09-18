@@ -2273,6 +2273,80 @@ class TestLegacyNullClaimEmbedding:
             assert legacy_after is not None
             assert legacy_after["claim_embedding"] is not None
 
+    async def test_between_windows_null_row_rejected_not_crashed_heal_commits(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Round-4 review: heal and guard share ONE lock window.
+
+        The two-window shape let an old-server writer slip a NULL-claim
+        lesson between the heal transaction and the guard's re-lock; the
+        guard's cosine then called .to_list() on NULL and crashed the write
+        instead of rejecting it. A serial test cannot interleave a writer
+        INSIDE the lock window (the xact lock serializes namespace writers —
+        injecting one there would also break the fixed code's contract), so
+        this pins the visible behavior of the single window: the state the
+        between-windows writer leaves behind (a NULL-claim row) meets the
+        verbatim write as a structured duplicate-claim REJECTION — text a
+        crash can never produce — and the heal COMMITS despite the
+        rejection because the reject is raised outside the transaction.
+        """
+        episode = _insert_episode(db, goal="racing incident", embedding=V_Y)
+
+        async with client as session:
+            row = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding)
+                VALUES (%(ns)s, %(claim)s, 'racing writer gist', %(embedding)s)
+                RETURNING id
+                """,
+                {
+                    "ns": DEFAULT_NS,
+                    "claim": _LEGACY_CLAIM,
+                    "embedding": pgvector.Vector(V_X),
+                },
+            ).fetchone()
+            assert row is not None
+            racer = int(row["id"])
+            db.commit()
+
+            rejected = _err(
+                await _write(
+                    session,
+                    claim=_LEGACY_CLAIM,
+                    because="a verbatim twin of the racing claim",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+            assert "duplicate claim" in rejected
+
+            # The heal committed even though the write was rejected.
+            db.commit()
+            healed = db.execute(
+                """
+                SELECT claim_embedding IS NOT NULL AS healed,
+                       claim_embedding <=> %(vec)s AS dist
+                FROM lessons WHERE id = %(id)s
+                """,
+                {"id": racer, "vec": pgvector.Vector(_claim_vector(_LEGACY_CLAIM))},
+            ).fetchone()
+            assert healed is not None
+            assert healed["healed"] is True
+            assert healed["dist"] == pytest.approx(0.0)
+
+            # A different claim in the same window shape is still admitted.
+            admitted = _ok(
+                await _write(
+                    session,
+                    claim="unrelated to the racing claim",
+                    because="a genuinely distinct mechanism",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+            assert int(admitted["lesson_id"]) > 0
+        assert _count(db, "lessons") == 2  # the racing row + the admitted write
+
 
 class TestClaimEmbeddingMigrationBackfill:
     def test_003_applies_after_002_and_backfills_preexisting_lessons(
