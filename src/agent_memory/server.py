@@ -20,10 +20,16 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 try:  # mcp>=2 renamed FastMCP to MCPServer; keep both import spellings working
-    from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
     from mcp.server.mcpserver import MCPServer
 except ImportError:  # fallback targets mcp 1.x, which is not installed here
     from mcp.server.fastmcp import FastMCP as MCPServer  # pyright: ignore[reportAttributeAccessIssue]
+
+try:  # the middleware machinery is 2.x-only; a 1.x install degrades instead
+    from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
+
+    _has_request_context = True
+except ImportError:  # annotations below stay quoted, so import stays safe
+    _has_request_context = False
 
 from agent_memory import db
 from agent_memory.config import get_settings
@@ -48,11 +54,13 @@ from agent_memory.usage import report_usage
 
 
 async def _observe_client_info(
-    ctx: ServerRequestContext[Any], call_next: CallNext
-) -> HandlerResult:
+    ctx: "ServerRequestContext[Any]", call_next: "CallNext"
+) -> "HandlerResult":
     """ServerMiddleware seam (Issue #4): wraps the initialize handshake
     before its commit, when params are still the raw wire mapping, so the
-    client's name feeds session_state's derived default namespace."""
+    client's name feeds session_state's derived default namespace. The
+    annotations are quoted because the context types are 2.x-only; they
+    still resolve via typing.get_type_hints on a 2.x install."""
     if ctx.method == "initialize":
         info = (ctx.params or {}).get("clientInfo")
         if isinstance(info, dict):
@@ -63,8 +71,17 @@ async def _observe_client_info(
 
 
 def create_server() -> MCPServer:
-    """Server factory; every task's tool registers on this one app."""
-    server: MCPServer = MCPServer(name="agent-memory", middleware=[_observe_client_info])
+    """Server factory; every task's tool registers on this one app.
+
+    Without the 2.x request-context machinery (an mcp 1.x install) the
+    middleware seam is skipped: no clientInfo-derived namespace, while the
+    param/session/configured tiers keep resolving unchanged."""
+    if _has_request_context:
+        server: MCPServer = MCPServer(
+            name="agent-memory", middleware=[_observe_client_info]
+        )
+    else:  # 1.x FastMCP has no middleware constructor parameter
+        server = MCPServer(name="agent-memory")
 
     @server.tool()
     def memory_capture_episode(

@@ -5,21 +5,24 @@ state IS session state: it dies with the process, nothing persists to the
 DB, and no schema is involved. The state is (a) a session override set via
 the memory_set_namespace tool and (b) the client name observed on the
 initialize handshake's clientInfo, which derives the agent half of the
-default namespace when MEMORY_NAMESPACE is unset.
+default namespace when no Settings source explicitly set MEMORY_NAMESPACE.
 
 Every pipeline resolves through resolve_namespace — precedence:
 
-    tool param  >  session-set  >  env (MEMORY_NAMESPACE, which the
-    --namespace CLI flag also writes)  >  derived default
+    tool param  >  session-set  >  MEMORY_NAMESPACE explicitly configured
+    via any Settings source (env var — the --namespace CLI flag writes env
+    — or direct Settings construction)  >  derived default
 
-The derived default is ``<sanitized clientInfo name>@local`` with a
-``default@local`` fallback when no usable name was observed (CLI
-subcommands, clients that skip clientInfo). ``global`` stays legal as an
-explicit per-tool param and as memory_promote's target, never as a session
-default — that mirrors write_lesson's promotion-only guard.
+Explicitness is detected with pydantic v2's ``model_fields_set``, so every
+source pydantic-settings honors counts; only the compiled-in default
+(``default@local``) falls through to the derived tier. The derived default
+is ``<sanitized clientInfo name>@local`` with a ``default@local`` fallback
+when no usable name was observed (CLI subcommands, clients that skip
+clientInfo). ``global`` stays legal as an explicit per-tool param and as
+memory_promote's target, never as a session default — that mirrors
+write_lesson's promotion-only guard.
 """
 
-import os
 import re
 
 try:  # mcp>=2 renamed FastMCP to MCPServer; keep both import spellings working
@@ -71,11 +74,11 @@ def set_session_namespace(namespace: str) -> str:
 
 
 def resolve_namespace(settings: Settings, param: str | None) -> str:
-    """param > session-set > env > derived default (see module docstring)."""
+    """param > session-set > configured > derived default (module docstring)."""
     if param is not None:
         return param
     if _session_namespace is not None:
         return _session_namespace
-    if "MEMORY_NAMESPACE" in os.environ:  # env-set: clientInfo is ignored
+    if "MEMORY_NAMESPACE" in settings.model_fields_set:
         return settings.MEMORY_NAMESPACE
     return f"{_client_name or 'default'}@local"

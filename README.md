@@ -152,8 +152,9 @@ rejects empty or whitespace-only values. When `MEMORY_NAMESPACE` is unset
 at startup, the agent half of the default namespace is derived from the
 initialize handshake's clientInfo name (sanitized; e.g. a client naming
 itself `Claude Desktop` defaults to `claude-desktop@local`), falling back
-to `default@local` when no clientInfo is available. When `MEMORY_NAMESPACE`
-is set, clientInfo is ignored — explicit config always wins.
+to `default@local` when no clientInfo is available. clientInfo applies only
+when `MEMORY_NAMESPACE` is left at its default — any explicit configuration
+(env var, `--namespace` CLI flag, or other settings source) wins.
 
 For agentic hosts this enables a set-and-forget workflow: run one global
 server config with no `MEMORY_NAMESPACE`, and have the agent call

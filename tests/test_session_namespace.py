@@ -1,9 +1,13 @@
 """Issue #4: session-scoped namespace + clientInfo-derived agent default.
 
-Every test spawns a module-local stdio server (conftest's shape) so each can
-pin its own clientInfo name and env tier; SQL asserts ride the ``db``
-fixture, never trusting tool payloads alone. Fixture-order contract: request
-``db`` before ``client`` — the ``db`` fixture performs the per-test TRUNCATE.
+Every precedence test spawns a module-local stdio server (conftest's shape)
+so each can pin its own clientInfo name and env tier; SQL asserts ride the
+``db`` fixture, never trusting tool payloads alone. Fixture-order contract:
+request ``db`` before ``client`` — the ``db`` fixture performs the per-test
+TRUNCATE. The PR #11 review tests at the bottom run WITHOUT a spawn:
+unit-level Settings-source tests (P2) and SDK-capability tests (P1),
+including one subprocess that imports the server against a blocked-import
+mcp 1.x SDK shim.
 
 Precedence under test (Issue #4):
     tool param  >  session-set (memory_set_namespace)  >  env (incl. the
@@ -15,11 +19,12 @@ clientInfo was observed.
 
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any
+from typing import Any, get_origin, get_type_hints
 
 import psycopg
 import pytest
@@ -321,3 +326,175 @@ def test_session_state_module_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_namespace(settings, None) == "session-ns@proj"
     with pytest.raises(ToolError):
         set_session_namespace("   ")
+
+
+def test_direct_settings_namespace_honored_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given MEMORY_NAMESPACE absent from env but a Settings constructed with
+    an explicit MEMORY_NAMESPACE (pydantic v2 marks init kwargs set), When
+    resolve runs below the param/session tiers, Then the explicitly
+    configured namespace wins — the env-only detection wrongly fell through
+    to the derived default here."""
+    import agent_memory.session_state as session_state
+    from agent_memory.config import Settings
+
+    monkeypatch.delenv("MEMORY_NAMESPACE", raising=False)
+    monkeypatch.setattr(session_state, "_session_namespace", None)
+    monkeypatch.setattr(session_state, "_client_name", "quokka")
+    settings = Settings(MEMORY_NAMESPACE="direct@set")
+    assert "MEMORY_NAMESPACE" in settings.model_fields_set
+    assert session_state.resolve_namespace(settings, None) == "direct@set"
+
+
+def test_compiled_default_namespace_derives_clientinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given NO Settings source provides MEMORY_NAMESPACE (the field is
+    absent from model_fields_set), When resolve runs with an observed client
+    name, Then the derived default wins — only the compiled-in default may
+    fall through to clientInfo."""
+    import agent_memory.session_state as session_state
+    from agent_memory.config import Settings
+
+    monkeypatch.delenv("MEMORY_NAMESPACE", raising=False)
+    monkeypatch.setattr(session_state, "_session_namespace", None)
+    monkeypatch.setattr(session_state, "_client_name", "quokka")
+    settings = Settings()
+    assert "MEMORY_NAMESPACE" not in settings.model_fields_set
+    assert session_state.resolve_namespace(settings, None) == "quokka@local"
+
+
+def test_env_source_marks_namespace_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given MEMORY_NAMESPACE via env (the dominant source), Then the field
+    IS in model_fields_set and resolve honors it — the explicit-detection
+    mechanism must not forget the env tier."""
+    import agent_memory.session_state as session_state
+    from agent_memory.config import Settings
+
+    monkeypatch.setenv("MEMORY_NAMESPACE", "env-ns@proj")
+    monkeypatch.setattr(session_state, "_session_namespace", None)
+    monkeypatch.setattr(session_state, "_client_name", "quokka")
+    settings = Settings()
+    assert "MEMORY_NAMESPACE" in settings.model_fields_set
+    assert session_state.resolve_namespace(settings, None) == "env-ns@proj"
+
+
+def test_client_info_middleware_wired_on_installed_sdk() -> None:
+    """Given the installed mcp 2.x SDK, Then the capability flag is True, the
+    quoted middleware annotations still resolve to the real context types
+    (typing.get_type_hints works — quoting cost nothing), and create_server
+    wires _observe_client_info into the middleware chain."""
+    from mcp.server.context import ServerRequestContext
+
+    import agent_memory.server as server_module
+
+    assert server_module._has_request_context is True
+    hints = get_type_hints(server_module._observe_client_info)
+    assert get_origin(hints["ctx"]) is ServerRequestContext
+    server = server_module.create_server()
+    assert any(
+        middleware is server_module._observe_client_info
+        for middleware in server.middleware
+    )
+
+
+def test_create_server_skips_middleware_when_capability_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given the capability flag forced off (what an mcp 1.x install
+    produces), When create_server runs on the real SDK, Then the server
+    still constructs with every tool registered and _observe_client_info is
+    NOT wired."""
+    import agent_memory.server as server_module
+
+    monkeypatch.setattr(server_module, "_has_request_context", False)
+    server = server_module.create_server()
+    assert not any(
+        middleware is server_module._observe_client_info
+        for middleware in server.middleware
+    )
+
+
+_MCP1_SIMULATION_PROGRAM = """
+import os
+import sys
+import types
+
+# mcp 1.x SDK shape: mcpserver/context absent, FastMCP present (mcp 2.x
+# replaced fastmcp with a tombstone module that raises ModuleNotFoundError).
+for missing in (
+    "mcp.server.mcpserver",
+    "mcp.server.mcpserver.exceptions",
+    "mcp.server.context",
+):
+    sys.modules[missing] = None
+
+fastmcp = types.ModuleType("mcp.server.fastmcp")
+
+
+class FastMCPStub:
+    # 1.x FastMCP constructor shape: takes name, has NO middleware parameter.
+    def __init__(self, name: str | None = None) -> None:
+        self.name = name
+        self.registered_tools = []
+
+    def tool(self):
+        def decorate(function):
+            self.registered_tools.append(function.__name__)
+            return function
+
+        return decorate
+
+
+fastmcp.FastMCP = FastMCPStub
+sys.modules["mcp.server.fastmcp"] = fastmcp
+
+exceptions = types.ModuleType("mcp.server.fastmcp.exceptions")
+
+
+class ToolError(Exception):
+    pass
+
+
+exceptions.ToolError = ToolError
+sys.modules["mcp.server.fastmcp.exceptions"] = exceptions
+
+os.environ.pop("MEMORY_NAMESPACE", None)
+
+import agent_memory.server as server_module
+
+server = server_module.create_server()
+assert server_module._has_request_context is False
+assert isinstance(server, FastMCPStub)
+assert len(server.registered_tools) == 14  # every tool registered, none lost
+
+from agent_memory.config import Settings
+from agent_memory.session_state import resolve_namespace
+
+assert resolve_namespace(Settings(), None) == "default@local"
+assert resolve_namespace(Settings(MEMORY_NAMESPACE="direct@set"), None) == "direct@set"
+os.environ["MEMORY_NAMESPACE"] = "env-ns@proj"
+assert resolve_namespace(Settings(), None) == "env-ns@proj"
+print("MCP1_SIMULATION_OK")
+"""
+
+
+def test_server_boots_on_mcp1_shaped_sdk() -> None:
+    """The review's crash scenario end to end: with an mcp 1.x SDK surface
+    (mcpserver/context blocked, FastMCP stubbed without a middleware
+    parameter), the server module must import AND create_server must succeed
+    with no middleware wiring, leaving env/default namespace precedence
+    intact. On Python <=3.13 the old unquoted annotations NameError'd at
+    import; 3.14's PEP 649 defers annotation evaluation, so there the red
+    was the constructor's middleware kwarg — quoting the annotations keeps
+    both interpreter lines safe, which is why this runs as a subprocess
+    (sys.modules surgery must not leak into the pytest process)."""
+    result = subprocess.run(
+        [sys.executable, "-c", _MCP1_SIMULATION_PROGRAM],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MCP1_SIMULATION_OK" in result.stdout
