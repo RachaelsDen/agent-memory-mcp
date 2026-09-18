@@ -3,10 +3,12 @@
 Owns the age-eligible episode pools and greedy scan clustering
 (``memory_consolidate_scan``, §8 step 1), the lesson write pipeline
 (``memory_write_lesson``, §8 step 3): server-owned seed confidence, the
-per-namespace duplicate-claim guard with its replacement-lineage exemption,
-and the similar/contradicts/refines link writes — and the evidence moves
-(``memory_corroborate`` / ``memory_contradict``, §8 step 4): novelty-scaled
-confidence transitions executed atomically under the lesson row lock.
+per-namespace duplicate-claim guard — a claim-identity bar with its
+replacement-lineage exemption, composite cosine driving similar links only
+(Issue #6) — and the similar/contradicts/refines link writes — and the
+evidence moves (``memory_corroborate`` / ``memory_contradict``, §8 step 4):
+novelty-scaled confidence transitions executed atomically under the lesson
+row lock.
 
 SIZE_OK by plan contract: tasks 9-11 deliberately share this one module
 (scan + write + evidence moves); the scan portion is frozen and later
@@ -237,7 +239,7 @@ EVIDENCE_EPISODES_SQL = """
 """
 
 NAMESPACE_LESSONS_SQL = """
-    SELECT id, embedding FROM lessons WHERE namespace = %(ns)s
+    SELECT id, embedding, claim_embedding FROM lessons WHERE namespace = %(ns)s
 """
 
 REPLACEMENT_TARGET_SQL = """
@@ -264,10 +266,11 @@ LINEAGE_SQL = """
 INSERT_LESSON_SQL = """
     INSERT INTO lessons (
         namespace, claim, because, holds_when, fails_when, confidence,
-        last_evidence_at, updated_at, embedding
+        last_evidence_at, updated_at, embedding, claim_embedding
     ) VALUES (
         %(namespace)s, %(claim)s, %(because)s, %(holds_when)s, %(fails_when)s,
-        %(confidence)s, %(last_evidence_at)s, now(), %(embedding)s
+        %(confidence)s, %(last_evidence_at)s, now(), %(embedding)s,
+        %(claim_embedding)s
     )
     RETURNING id
 """
@@ -354,7 +357,11 @@ def write_lesson(
             "by memory_promote (copy with provenance, DESIGN §11); write the "
             "lesson in its own namespace and promote it instead"
         )
-    vector = load_embedder(settings).embed([f"{claim} {because} {holds_when}"])[0]
+    # Two embeddings, two jobs (Issue #6): the composite drives retrieval and
+    # similar-links; the claim alone drives the duplicate-identity guard.
+    composite_vector, claim_vector = load_embedder(settings).embed(
+        [f"{claim} {because} {holds_when}", claim]
+    )
 
     connection: psycopg.Connection[DictRow] = db.connect()
     try:
@@ -400,17 +407,31 @@ def write_lesson(
             existing = connection.execute(
                 NAMESPACE_LESSONS_SQL, {"ns": effective_ns}
             ).fetchall()
+            # Composite cosine feeds similar-links ONLY (Issue #6): identical
+            # rationale under a different claim links, never rejects.
             similarities = [
-                (int(row["id"]), _cosine(vector, row["embedding"].to_list()))
+                (int(row["id"]), _cosine(composite_vector, row["embedding"].to_list()))
                 for row in existing
             ]
-            for lesson_pk, cosine in similarities:
-                if lesson_pk not in exempt and cosine > settings.DUP_CLAIM_COS:
+            # The rejection bar is claim identity. NULL claim_embedding rows
+            # (written before 003's backfill reached them) carry no claim
+            # identity to compare and are skipped by this bar.
+            claim_twins = [
+                (
+                    int(row["id"]),
+                    _cosine(claim_vector, row["claim_embedding"].to_list()),
+                )
+                for row in existing
+                if row["claim_embedding"] is not None
+            ]
+            for lesson_pk, claim_cosine in claim_twins:
+                if lesson_pk not in exempt and claim_cosine > settings.DUP_CLAIM_COS:
                     raise ToolError(
-                        f"duplicate claim: cosine {cosine:.3f} to lesson "
-                        f"{lesson_pk} in namespace {effective_ns!r} exceeds "
-                        f"DUP_CLAIM_COS={settings.DUP_CLAIM_COS}; supersede it "
-                        "via replaces_disputed on a disputed lesson instead"
+                        f"duplicate claim: claim cosine {claim_cosine:.3f} to "
+                        f"lesson {lesson_pk} in namespace {effective_ns!r} "
+                        f"exceeds DUP_CLAIM_COS={settings.DUP_CLAIM_COS}; "
+                        "supersede it via replaces_disputed on a disputed "
+                        "lesson instead"
                     )
 
             seeding_rows = [
@@ -446,7 +467,8 @@ def write_lesson(
                     "fails_when": fails_when,
                     "confidence": confidence,
                     "last_evidence_at": max(row["created_at"] for row in episode_rows),
-                    "embedding": pgvector.Vector(vector),
+                    "embedding": pgvector.Vector(composite_vector),
+                    "claim_embedding": pgvector.Vector(claim_vector),
                 },
             ).fetchone()
             assert lesson_row is not None  # INSERT ... RETURNING yields one row

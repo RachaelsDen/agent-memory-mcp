@@ -284,7 +284,8 @@ class TestPromoteCopy:
         # SAME embedding, bit-for-bit, through the vector adapter round-trip.
         embedding_row = db.execute(
             """
-            SELECT (c.embedding = s.embedding) AS same_embedding
+            SELECT (c.embedding = s.embedding) AS same_embedding,
+                   (c.claim_embedding = s.claim_embedding) AS same_claim_embedding
             FROM lessons c, lessons s
             WHERE c.id = %(copy)s AND s.id = %(src)s
             """,
@@ -292,6 +293,7 @@ class TestPromoteCopy:
         ).fetchone()
         assert embedding_row is not None
         assert embedding_row["same_embedding"] is True
+        assert embedding_row["same_claim_embedding"] is True
 
         # The ORIGINAL is untouched: every column byte-identical.
         assert _lesson_json(db, lesson_id) == source_snapshot
@@ -328,6 +330,58 @@ class TestPromoteCopy:
             )
         assert int(payload["promoted_lesson_id"]) != lesson_id
         assert _lesson_row(db, int(payload["promoted_lesson_id"]))["namespace"] == GLOBAL
+
+    async def test_copy_inherits_claim_embedding_and_blocks_duplicates(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        ep_support = _insert_episode(
+            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
+        )
+        ep_target = _insert_episode(
+            db, goal="episode in target namespace", embedding=V_L, at=DAY_1
+        )
+        async with client as session:
+            written = await _write(
+                session, evidence=[{"episode_id": ep_support, "relation": "support"}]
+            )
+            lesson_id = int(written["lesson_id"])
+            payload = _ok(
+                await _promote(
+                    session,
+                    lesson_id,
+                    reason="graduate to target",
+                    target_namespace=THIRD_NS,
+                )
+            )
+            copy_id = int(payload["promoted_lesson_id"])
+
+            claim_emb_row = db.execute(
+                """
+                SELECT c.claim_embedding IS NOT NULL AS copy_claim_emb_not_null,
+                       (c.claim_embedding <=> s.claim_embedding) AS claim_emb_dist
+                FROM lessons c, lessons s
+                WHERE c.id = %(copy)s AND s.id = %(src)s
+                """,
+                {"copy": copy_id, "src": lesson_id},
+            ).fetchone()
+            assert claim_emb_row is not None
+            assert claim_emb_row["copy_claim_emb_not_null"] is True
+            assert claim_emb_row["claim_emb_dist"] == pytest.approx(0.0)
+
+            error = _err(
+                await session.call_tool(
+                    "memory_write_lesson",
+                    {
+                        "claim": CLAIM,
+                        "because": "different because text in target",
+                        "evidence": [{"episode_id": ep_target, "relation": "support"}],
+                        "namespace": THIRD_NS,
+                    },
+                )
+            )
+            assert "duplicate" in error
 
 
 class TestPromoteVisibility:

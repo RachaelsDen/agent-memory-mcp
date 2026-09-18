@@ -15,9 +15,12 @@ their sections at the markers below — do not reorder this header block.
 """
 
 import json
+import os
+import shutil
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pgvector
@@ -27,8 +30,11 @@ from mcp import ClientSession
 from mcp.types import CallToolResult, TextContent
 from psycopg import sql
 from psycopg.rows import DictRow
+from testcontainers.community.postgres import PostgresContainer
 
+import agent_memory.db as agent_db
 from agent_memory.config import get_settings
+from agent_memory.embed import FakeEmbedder
 from tests.conftest import backdate
 
 DIM = 8
@@ -73,6 +79,15 @@ def _capture_text(fields: dict[str, Any]) -> str:
     )
 
 
+def _claim_vector(claim: str) -> list[float]:
+    """The claim embedding the server's FakeEmbedder yields for this claim.
+
+    No test pins an override on a BARE claim (override keys are the 3-field
+    composite join), so test process and server derive the same hash vector.
+    """
+    return FakeEmbedder(dim=DIM).embed([claim])[0]
+
+
 def _insert_episode(
     db: psycopg.Connection[DictRow],
     *,
@@ -104,11 +119,17 @@ def _insert_lesson(
 ) -> int:
     row = db.execute(
         """
-        INSERT INTO lessons (namespace, claim, because, embedding)
-        VALUES (%(namespace)s, %(claim)s, 'causal gist', %(embedding)s)
+        INSERT INTO lessons (namespace, claim, because, embedding, claim_embedding)
+        VALUES (%(namespace)s, %(claim)s, 'causal gist', %(embedding)s,
+                %(claim_embedding)s)
         RETURNING id
         """,
-        {"namespace": namespace, "claim": claim, "embedding": pgvector.Vector(V_X)},
+        {
+            "namespace": namespace,
+            "claim": claim,
+            "embedding": pgvector.Vector(V_X),
+            "claim_embedding": pgvector.Vector(_claim_vector(claim)),
+        },
     ).fetchone()
     assert row is not None
     return int(row["id"])
@@ -490,14 +511,16 @@ def _insert_lesson_vec(
 ) -> int:
     row = db.execute(
         """
-        INSERT INTO lessons (namespace, claim, because, embedding)
-        VALUES (%(namespace)s, %(claim)s, 'causal gist', %(embedding)s)
+        INSERT INTO lessons (namespace, claim, because, embedding, claim_embedding)
+        VALUES (%(namespace)s, %(claim)s, 'causal gist', %(embedding)s,
+                %(claim_embedding)s)
         RETURNING id
         """,
         {
             "namespace": namespace,
             "claim": claim,
             "embedding": pgvector.Vector(list(vector)),
+            "claim_embedding": pgvector.Vector(_claim_vector(claim)),
         },
     ).fetchone()
     assert row is not None
@@ -993,16 +1016,24 @@ class TestScanReplaceScanCycle:
 
 
 class TestFullReplacementCycleABC:
-    """Round-05 review fix: the FULL A->B->C lineage exemption cycle."""
+    """Round-05 review fix: the FULL A->B->C lineage exemption cycle.
+
+    Issue #6 restatement: every re-derivation shares the disputed
+    predecessor's claim VERBATIM, so each replacement is claim-identical
+    (cosine exactly 1.0 under FakeEmbedder) to the whole lineage — only the
+    exemption admits it, and an unexempted verbatim twin is still rejected.
+    """
+
+    CYCLE_CLAIM = "backoff tames retry storms"
 
     @pytest.fixture()
     def fake_embed_overrides(self) -> dict[str, list[float]]:
-        # every near-identical claim text embeds to V_X (cos 1.0 pairwise)
+        # both composites in the cycle embed to V_X (cos 1.0 pairwise)
         return {
-            _lesson_text("backoff tames retry storms", "storms amplify load", "packet loss"): V_X,
-            _lesson_text("backoff tames retry storms v2", "storms amplify load", "packet loss"): V_X,
-            _lesson_text("backoff tames retry storms v3", "storms amplify load", "packet loss"): V_X,
-            _lesson_text("backoff tames retry storms v4", "storms amplify load", "packet loss"): V_X,
+            _lesson_text(self.CYCLE_CLAIM, "storms amplify load", "packet loss"): V_X,
+            _lesson_text(
+                self.CYCLE_CLAIM, "re-derived after the dispute", "packet loss"
+            ): V_X,
         }
 
     async def test_full_a_b_c_replacement_cycle(
@@ -1010,6 +1041,7 @@ class TestFullReplacementCycleABC:
         db: psycopg.Connection[DictRow],
         client: AbstractAsyncContextManager[ClientSession],
     ) -> None:
+        claim = self.CYCLE_CLAIM
         source = _insert_episode(db, goal="cycle source", embedding=V_X)
         evidence = [{"episode_id": source, "relation": "support"}]
 
@@ -1017,7 +1049,7 @@ class TestFullReplacementCycleABC:
             a = _ok(
                 await _write(
                     session,
-                    claim="backoff tames retry storms",
+                    claim=claim,
                     because="storms amplify load",
                     holds_when="packet loss",
                     evidence=evidence,
@@ -1026,11 +1058,12 @@ class TestFullReplacementCycleABC:
             a_id = int(a["lesson_id"])
             _dispute(db, a_id)
 
+            # B is claim-identical to A (verbatim re-derivation): exempt
             b = _ok(
                 await _write(
                     session,
-                    claim="backoff tames retry storms v2",
-                    because="storms amplify load",
+                    claim=claim,
+                    because="re-derived after the dispute",
                     holds_when="packet loss",
                     evidence=evidence,
                     replaces_disputed=a_id,
@@ -1039,11 +1072,11 @@ class TestFullReplacementCycleABC:
             b_id = int(b["lesson_id"])
             _dispute(db, b_id)
 
-            # guard must exempt B AND lineage ancestor A (both cos 1.0 to C)
+            # C is claim-identical to B AND ancestor A: lineage exempts both
             c = _ok(
                 await _write(
                     session,
-                    claim="backoff tames retry storms v3",
+                    claim=claim,
                     because="storms amplify load",
                     holds_when="packet loss",
                     evidence=evidence,
@@ -1052,12 +1085,12 @@ class TestFullReplacementCycleABC:
             )
             c_id = int(c["lesson_id"])
 
-            # an unrelated near-duplicate WITHOUT replaces_disputed is rejected
+            # a verbatim twin WITHOUT replaces_disputed is rejected
             rejected = _err(
                 await _write(
                     session,
-                    claim="backoff tames retry storms v4",
-                    because="storms amplify load",
+                    claim=claim,
+                    because="re-derived after the dispute",
                     holds_when="packet loss",
                     evidence=evidence,
                 )
@@ -1102,8 +1135,10 @@ class TestConcurrentWriteLesson:
             PGVECTOR_DIM=DIM,
             FAKE_EMBED_OVERRIDES=json.dumps(
                 {
-                    _lesson_text("raced claim one", "raced cause", ""): V_X,
-                    _lesson_text("raced claim two", "raced cause", ""): V_X,
+                    # one VERBATIM claim, two rationale wordings: the loser
+                    # is claim-identical to the winner (Issue #6 bar)
+                    _lesson_text("raced claim", "raced cause one", ""): V_X,
+                    _lesson_text("raced claim", "raced cause two", ""): V_X,
                 }
             ),
         )
@@ -1112,13 +1147,13 @@ class TestConcurrentWriteLesson:
         outcomes: list[tuple[str, Any]] = []
         lock = threading.Lock()
 
-        def racer(claim: str) -> None:
+        def racer(because: str) -> None:
             barrier.wait(timeout=30.0)
             try:
                 result = write_lesson(
                     settings,
-                    claim=claim,
-                    because="raced cause",
+                    claim="raced claim",
+                    because=because,
                     holds_when="",
                     evidence=evidence,
                 )
@@ -1129,8 +1164,8 @@ class TestConcurrentWriteLesson:
                     outcomes.append(("error", str(exc)))
 
         threads = [
-            threading.Thread(target=racer, args=(claim,))
-            for claim in ("raced claim one", "raced claim two")
+            threading.Thread(target=racer, args=(because,))
+            for because in ("raced cause one", "raced cause two")
         ]
         for thread in threads:
             thread.start()
@@ -1974,3 +2009,262 @@ class TestReasonSecretScreen:
         after = _lesson_state(db, lesson_id)["confidence"]
         assert after == pytest.approx(max(before - 0.2, 0.05))
         assert _count(db, "lesson_evidence") == 2
+
+
+# === Issue #6 section: two-threshold duplicate-lesson guard ================
+# Claim identity is the rejection bar: claim-only cosine > DUP_CLAIM_COS
+# rejects (verbatim claims with different rationale no longer slip past);
+# the replaces_disputed lineage is the sanctioned verbatim path; composite
+# cosine governs ONLY similar links. Under FakeEmbedder, verbatim claims
+# embed to cosine exactly 1.0 (same text -> same hash vector) while distinct
+# claims land near-random (<< 0.95): claim pairs come from plain text reuse,
+# paraphrase pairs from distinct claim texts.
+
+_LEGACY_CLAIM = "back up before schema sweeps"
+
+
+class TestTwoThresholdClaimGuard:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return {
+            # paraphrase test: composite cos 0.8 to the fixture's stored V_X
+            _lesson_text(
+                "load shedders trip well before overload",
+                "eager tripping keeps latency bounded",
+                "traffic bursts",
+            ): V_SIM,
+        }
+
+    async def test_verbatim_claim_different_because_rejected(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """The Issue #6 repro shape: identical claim, different rationale."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+        _insert_lesson(db, claim="always pin the base image digest")
+
+        async with client as session:
+            error = _err(
+                await _write(
+                    session,
+                    claim="always pin the base image digest",
+                    because="a wholly different one-line rationale",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+
+        assert "duplicate" in error
+        assert _count(db, "lessons") == 1  # the fixture only
+        assert _count(db, "lesson_evidence") == 0
+
+    async def test_claim_cosine_exactly_one_rejected(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Boundary: the claim bar fires at the maximum cosine, 1.000."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+        _insert_lesson(db, claim="retry budgets cap total attempts")
+
+        async with client as session:
+            error = _err(
+                await _write(
+                    session,
+                    claim="retry budgets cap total attempts",
+                    because="identical claim and identical rationale text",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+
+        assert "duplicate" in error
+        assert "1.000" in error
+
+    async def test_verbatim_claim_via_replaces_disputed_lineage_admitted(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Re-derivations share their claim by design: lineage exempts."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+        predecessor = _insert_lesson(db, claim="page only on sustained errors")
+        _dispute(db, predecessor)
+
+        async with client as session:
+            replacement = _ok(
+                await _write(
+                    session,
+                    claim="page only on sustained errors",
+                    because="re-derived after the dispute",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                    replaces_disputed=predecessor,
+                )
+            )
+
+        replacement_id = int(replacement["lesson_id"])
+        assert _count(db, "lessons") == 2
+        refines = db.execute(
+            """
+            SELECT lesson_id, related_lesson_id FROM lesson_links
+            WHERE kind = 'refines'
+            """
+        ).fetchall()
+        assert [
+            (int(row["lesson_id"]), int(row["related_lesson_id"])) for row in refines
+        ] == [(replacement_id, predecessor)]
+
+    async def test_near_claim_paraphrase_admitted_with_similar_links(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Different claim, similar document: linked, never rejected."""
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+        existing = _insert_lesson_vec(
+            db, claim="circuit breakers shed load gracefully", vector=V_X
+        )
+
+        async with client as session:
+            payload = _ok(
+                await _write(
+                    session,
+                    claim="load shedders trip well before overload",
+                    because="eager tripping keeps latency bounded",
+                    holds_when="traffic bursts",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+
+        new_id = int(payload["lesson_id"])
+        links = db.execute(
+            """
+            SELECT lesson_id, related_lesson_id, weight FROM lesson_links
+            WHERE kind = 'similar'
+            """
+        ).fetchall()
+        pairs = {
+            (int(row["lesson_id"]), int(row["related_lesson_id"])): float(row["weight"])
+            for row in links
+        }
+        assert (new_id, existing) in pairs
+        assert (existing, new_id) in pairs
+
+
+class TestLegacyNullClaimEmbedding:
+    @pytest.fixture()
+    def fake_embed_overrides(self) -> dict[str, list[float]]:
+        return {
+            # composite pinned to the legacy row's V_X -> similar links fire
+            _lesson_text(_LEGACY_CLAIM, "mid-flight rows corrupt otherwise", ""): V_X,
+        }
+
+    async def test_null_claim_row_skipped_and_composite_still_links(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Pre-backfill rows (claim_embedding NULL) carry no claim identity:
+        the claim bar skips them; the composite channel still links.
+
+        The legacy row is inserted AFTER the server's startup migrate (which
+        backfills NULLs), modeling a pre-003 writer leaving rows behind on a
+        migrated database.
+        """
+        episode = _insert_episode(db, goal="incident", embedding=V_Y)
+
+        async with client as session:
+            row = db.execute(
+                """
+                INSERT INTO lessons (namespace, claim, because, embedding)
+                VALUES (%(ns)s, %(claim)s, 'legacy gist', %(embedding)s)
+                RETURNING id
+                """,
+                {
+                    "ns": DEFAULT_NS,
+                    "claim": _LEGACY_CLAIM,
+                    "embedding": pgvector.Vector(V_X),
+                },
+            ).fetchone()
+            assert row is not None
+            legacy = int(row["id"])
+
+            payload = _ok(
+                await _write(
+                    session,
+                    claim=_LEGACY_CLAIM,
+                    because="mid-flight rows corrupt otherwise",
+                    evidence=[{"episode_id": episode, "relation": "support"}],
+                )
+            )
+
+        new_id = int(payload["lesson_id"])
+        links = db.execute(
+            """
+            SELECT lesson_id, related_lesson_id FROM lesson_links
+            WHERE kind = 'similar'
+            """
+        ).fetchall()
+        assert {
+            (int(link["lesson_id"]), int(link["related_lesson_id"])) for link in links
+        } == {(new_id, legacy), (legacy, new_id)}
+
+
+class TestClaimEmbeddingMigrationBackfill:
+    def test_003_applies_after_002_and_backfills_preexisting_lessons(
+        self,
+        pg: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Upgrade path: a lesson written pre-003 gets its claim embedded by
+        the migrate() Python backfill (embed(claim), dim-matched), and a
+        second migrate pass is a full no-op."""
+        real_dir = agent_db.MIGRATIONS_DIR
+        pre_003 = tmp_path / "pre003"
+        pre_003.mkdir()
+        for name in ("001_init.sql", "002_dispute_reason.sql"):
+            shutil.copy(real_dir / name, pre_003 / name)
+        legacy_claim = "migrations must run before serving traffic"
+        with PostgresContainer("pgvector/pgvector:pg16") as container:
+            url = container.get_connection_url(driver=None)
+            previous = os.environ.get("DATABASE_URL")
+            os.environ["DATABASE_URL"] = url
+            get_settings.cache_clear()
+            try:
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", pre_003)
+                assert agent_db.migrate(dim=DIM) == [
+                    "001_init.sql",
+                    "002_dispute_reason.sql",
+                ]
+                with psycopg.connect(url, autocommit=True) as conn:
+                    legacy = conn.execute(
+                        """
+                        INSERT INTO lessons (namespace, claim, because, embedding)
+                        VALUES (
+                            'default@local', %(claim)s, 'legacy gist',
+                            '[1,0,0,0,0,0,0,0]'
+                        )
+                        RETURNING id
+                        """,
+                        {"claim": legacy_claim},
+                    ).fetchone()
+                assert legacy is not None
+
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
+                assert agent_db.migrate(dim=DIM) == ["003_claim_embedding.sql"]
+                assert agent_db.migrate(dim=DIM) == []  # idempotent no-op
+            finally:
+                if previous is None:
+                    os.environ.pop("DATABASE_URL", None)
+                else:
+                    os.environ["DATABASE_URL"] = previous
+                get_settings.cache_clear()
+            with psycopg.connect(url, autocommit=True) as conn:
+                stored = conn.execute(
+                    "SELECT claim_embedding::text FROM lessons WHERE id = %(id)s",
+                    {"id": legacy[0]},
+                ).fetchone()
+        assert stored is not None and stored[0] is not None
+        floats = [float(part) for part in str(stored[0]).strip("[]").split(",")]
+        expected = FakeEmbedder(dim=DIM).embed([legacy_claim])[0]
+        assert floats == pytest.approx(expected)  # float32 round-trip tolerance

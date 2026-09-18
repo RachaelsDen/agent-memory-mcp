@@ -37,7 +37,7 @@ from agent_memory.secrets import screen_secrets
 # the lock wait re-reads, so the copied confidence is the committed value.
 PROMOTE_SOURCE_SQL = """
     SELECT id, namespace, claim, because, holds_when, fails_when, confidence,
-           embedding
+           embedding, claim_embedding
     FROM lessons
     WHERE id = %(id)s
     FOR UPDATE
@@ -46,11 +46,11 @@ PROMOTE_SOURCE_SQL = """
 INSERT_PROMOTED_LESSON_SQL = """
     INSERT INTO lessons (
         namespace, claim, because, holds_when, fails_when, confidence,
-        embedding, promoted_from_lesson_id, promotion_reason, promoted_at,
+        embedding, claim_embedding, promoted_from_lesson_id, promotion_reason, promoted_at,
         promotion_seed_confidence, promotion_status
     ) VALUES (
         %(namespace)s, %(claim)s, %(because)s, %(holds_when)s, %(fails_when)s,
-        %(confidence)s, %(embedding)s, %(promoted_from_lesson_id)s,
+        %(confidence)s, %(embedding)s, %(claim_embedding)s, %(promoted_from_lesson_id)s,
         %(promotion_reason)s, now(), %(promotion_seed_confidence)s, 'active'
     )
     RETURNING id
@@ -113,6 +113,7 @@ def promote(
                     # outside seeding and the evidence moves (F2)
                     "confidence": source["confidence"],
                     "embedding": source["embedding"],
+                    "claim_embedding": source["claim_embedding"],
                     "promoted_from_lesson_id": source["id"],
                     "promotion_reason": reason,
                     "promotion_seed_confidence": source["confidence"],

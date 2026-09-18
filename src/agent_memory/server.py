@@ -223,10 +223,12 @@ def create_server() -> MCPServer:
         "support"|"refine"|"contradict", "reason": str}; at least one
         support/refine edge is required. Confidence is seeded SERVER-side
         from incident collapse + day diversity — never caller-supplied.
-        Near-duplicate claims (cosine > DUP_CLAIM_COS to an existing lesson
-        in the namespace) are rejected unless they supersede a disputed
-        lesson via replaces_disputed, which also writes the refines link
-        that completes the predecessor's pending re-derivation. Similar
+        Claim-identical lessons (claim-only cosine > DUP_CLAIM_COS to an
+        existing lesson in the namespace) are rejected unless they supersede
+        a disputed lesson via replaces_disputed, which also writes the
+        refines link that completes the predecessor's pending
+        re-derivation; the composite claim+because+holds_when cosine
+        drives similar links only. Similar
         lessons are linked in both directions; contradicts names an
         opposing lesson (P9). namespace 'global' is rejected — global
         lessons are created only by memory_promote (DESIGN §11). Returns

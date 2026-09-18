@@ -765,8 +765,11 @@ class TestMigrationUpgrade:
                 assert agent_db.migrate(dim=8) == ["001_init.sql"]
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
                 # every table from 001 already exists — only the bookkeeping
-                # comparison can see that 002 is pending.
-                assert agent_db.migrate(dim=8) == ["002_dispute_reason.sql"]
+                # comparison can see that 002 and 003 are pending.
+                assert agent_db.migrate(dim=8) == [
+                    "002_dispute_reason.sql",
+                    "003_claim_embedding.sql",
+                ]
                 assert agent_db.migrate(dim=8) == []
             finally:
                 if previous is None:
@@ -778,7 +781,11 @@ class TestMigrationUpgrade:
                 names = {
                     row[0] for row in conn.execute("SELECT name FROM agent_memory_migrations")
                 }
-                assert names == {"001_init.sql", "002_dispute_reason.sql"}
+                assert names == {
+                    "001_init.sql",
+                    "002_dispute_reason.sql",
+                    "003_claim_embedding.sql",
+                }
                 column = conn.execute(
                     """
                     SELECT count(*) FROM information_schema.columns
