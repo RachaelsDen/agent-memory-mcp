@@ -48,9 +48,10 @@ new migration files and restarting.
 
 All snippets run the installed `agent-memory` console script through `uv`. Replace
 `/path/to/agent-memory-mcp` in the snippets below with the absolute path of your clone.
-Namespaces are exact scopes (`agent@this-project` convention; no prefix hierarchy). The
-intended setup is a per-project configuration pinning that project's namespace; a global
-config that hardcodes one project's namespace scopes every session across all repositories to it.
+With no namespace configuration, the server derives an agent namespace from the MCP client's
+`clientInfo` name, such as `claude-desktop@local`. Namespaces are exact scopes
+(`agent@this-project` convention; no prefix hierarchy). Set an override only when you want to pin
+a project or deliberately share another scope.
 
 ### Claude Desktop
 
@@ -68,22 +69,21 @@ config that hardcodes one project's namespace scopes every session across all re
         "agent-memory"
       ],
       "env": {
-        "DATABASE_URL": "postgresql://agent_memory:agent_memory@localhost:55432/agent_memory",
-        "MEMORY_NAMESPACE": "claude@this-project"
+        "DATABASE_URL": "postgresql://agent_memory:agent_memory@localhost:55432/agent_memory"
       }
     }
   }
 }
 ```
 
-Because Claude Desktop has a single global configuration, to work across multiple
-projects duplicate the block with distinct server keys (e.g., `agent-memory-projA`)
-and namespaces, or omit `MEMORY_NAMESPACE` (defaulting to `default@local`) and pass
-the `namespace` tool parameter per call.
+The namespace is auto-derived from the client identity, for example
+`claude-desktop@local`. Set `MEMORY_NAMESPACE` only to override it globally, or call
+`memory_set_namespace("agent@this-project")` at session start for project scoping.
 
 ### opencode
 
-Repository-root `opencode.json` (project-level configuration overriding the user-level config):
+Repository-root `opencode.json`, shown here as a deliberate per-project namespace override of the
+user-level config:
 
 ```json
 {
@@ -105,10 +105,9 @@ Repository-root `opencode.json` (project-level configuration overriding the user
 }
 ```
 
-In a user-level global config (`~/.config/opencode/opencode.json`), omit `MEMORY_NAMESPACE`
-rather than pinning a project—but note that omitting `MEMORY_NAMESPACE` globally requires a
-per-repo override in every project you use. Projects without an override will share `default@local`
-(treat that as a consciously-accepted shared scope, or pin per-repo configs instead).
+In a user-level global config (`~/.config/opencode/opencode.json`), omit `MEMORY_NAMESPACE` and let
+the server derive `opencode@local`. Projects without an override share that client-derived scope;
+pin a repository with `MEMORY_NAMESPACE` or `memory_set_namespace` when project isolation matters.
 
 ### Generic MCP client
 
@@ -123,9 +122,10 @@ MCP error results, never process exits.
 
 ## Namespaces
 
-Memory is scoped by namespace (`agent@project` by convention; `global` holds
-promoted lessons every namespace can see). Namespaces are exact-match strings
-with no prefix hierarchy (`opencode` and `opencode@proj` are disjoint scopes).
+Memory starts with a zero-config agent namespace derived from the MCP client's `clientInfo` name,
+such as `opencode@local`; use an override when you need project pinning (`agent@project` by
+convention). `global` holds promoted lessons every namespace can see. Namespaces are exact-match
+strings with no prefix hierarchy (`opencode` and `opencode@proj` are disjoint scopes).
 Lessons move between namespaces only through promotion; `global` is the one
 namespace every probe sees automatically, while promoted copies in other
 namespaces are visible when you query those namespaces directly. Evidence edges
@@ -156,11 +156,11 @@ to `default@local` when no clientInfo is available. clientInfo applies only
 when `MEMORY_NAMESPACE` is left at its default — any explicit configuration
 (env var, `--namespace` CLI flag, or other settings source) wins.
 
-For agentic hosts this enables a set-and-forget workflow: run one global
-server config with no `MEMORY_NAMESPACE`, and have the agent call
-`memory_set_namespace("me@this-project")` at the start of each session
-(e.g. one line in `AGENTS.md`/`CLAUDE.md`). Per-project host configs remain
-the answer for non-agentic clients.
+For agentic hosts, run one global server config with no `MEMORY_NAMESPACE`; the client-derived
+agent namespace works without setup. To pin memory per project, have the agent call
+`memory_set_namespace("me@this-project")` at the start of each session, for example from one line
+in `AGENTS.md` or `CLAUDE.md`. Per-project host configs provide the same explicit override for
+non-agentic clients.
 
 ## CLI reference
 
