@@ -133,6 +133,10 @@ agent-memory
 With no arguments the process serves MCP over stdio; tool errors come back as
 MCP error results, never process exits.
 
+### Agent instructions
+
+For your agent to actually USE the memory tools, add the discipline block from [examples/AGENTS-memory.md](examples/AGENTS-memory.md) to your agent's instruction file (AGENTS.md, CLAUDE.md, .cursorrules, or system prompt). Without it, the tools are available but the agent may not think to use them.
+
 ## Namespaces
 
 Memory starts with a zero-config agent namespace derived from the MCP client's `clientInfo` name,
