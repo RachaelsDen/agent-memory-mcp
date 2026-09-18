@@ -769,6 +769,53 @@ class TestPromoteClaimIdentityBar:
             # source + NULL seat + distinct lesson + its global copy
             assert _count(db, "lessons") == 4
 
+    async def test_demoted_tombstone_does_not_block_promotion(
+        self,
+        db: psycopg.Connection[DictRow],
+        client: AbstractAsyncContextManager[ClientSession],
+    ) -> None:
+        """Demoted tombstones in target namespace do not block re-promotion of identical claim."""
+        ep_support = _insert_episode(
+            db, goal="support the pacing claim", embedding=V_L, at=DAY_1
+        )
+        async with client as session:
+            alpha = await _write(
+                session,
+                evidence=[{"episode_id": ep_support, "relation": "support"}],
+                namespace="alpha@proj",
+            )
+            beta = await _write(
+                session,
+                evidence=[{"episode_id": ep_support, "relation": "support"}],
+                namespace="beta@proj",
+            )
+            alpha_id = int(alpha["lesson_id"])
+            beta_id = int(beta["lesson_id"])
+
+            payload1 = _ok(await _promote(session, alpha_id, reason="first graduation"))
+            copy_id_1 = int(payload1["promoted_lesson_id"])
+
+            await _demote(session, copy_id_1, reason="retire first copy")
+
+            payload2 = _ok(
+                await _promote(session, beta_id, reason="second graduation after demotion")
+            )
+            copy_id_2 = int(payload2["promoted_lesson_id"])
+
+        rows = db.execute(
+            """
+            SELECT id, promotion_status FROM lessons
+            WHERE namespace = %(ns)s
+            ORDER BY id
+            """,
+            {"ns": GLOBAL},
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["id"] == copy_id_1
+        assert rows[0]["promotion_status"] == "demoted"
+        assert rows[1]["id"] == copy_id_2
+        assert rows[1]["promotion_status"] == "active"
+
 
 class TestDemoteValidation:
     """Demote requires a promotion; anything else is an MCP error result."""

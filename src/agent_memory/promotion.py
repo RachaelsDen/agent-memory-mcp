@@ -99,12 +99,14 @@ HEAL_CLAIM_EMBEDDING_SQL = """
     UPDATE lessons SET claim_embedding = %(claim_embedding)s WHERE id = %(id)s
 """
 
-# Target rows INCLUDING NULL claim embeddings: an old-server promotion
+# Target ACTIVE rows INCLUDING NULL claim embeddings: an old-server promotion
 # creates NULL global copies, and a NOT NULL filter here would let a new
-# identical-claim graduation slip past the bar. The NULLs are healed under
-# the already-held target advisory lock before the comparison.
+# identical-claim graduation slip past the bar. Demoted tombstones are excluded
+# (promotion_status = 'active') because a demoted copy does not block re-promotion.
+# The NULLs are healed under the already-held target advisory lock before the comparison.
 TARGET_LESSONS_SQL = """
-    SELECT id, claim, claim_embedding FROM lessons WHERE namespace = %(ns)s
+    SELECT id, claim, claim_embedding FROM lessons
+    WHERE namespace = %(ns)s AND promotion_status = 'active'
 """
 
 DEMOTE_SOURCE_SQL = """
