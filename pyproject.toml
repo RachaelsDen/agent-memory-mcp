@@ -9,7 +9,7 @@ description = "Agent Memory MCP server with pgvector memory and knowledge graph"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=2.2.0",
     "psycopg[binary]>=3.2",
     "pgvector>=0.3.6",
     "sentence-transformers>=3.0",

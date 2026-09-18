@@ -24,6 +24,13 @@ try:  # mcp>=2 renamed FastMCP to MCPServer; keep both import spellings working
 except ImportError:  # fallback targets mcp 1.x, which is not installed here
     from mcp.server.fastmcp import FastMCP as MCPServer  # pyright: ignore[reportAttributeAccessIssue]
 
+try:  # the middleware machinery is 2.x-only; a 1.x install degrades instead
+    from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
+
+    _has_request_context = True
+except ImportError:  # annotations below stay quoted, so import stays safe
+    _has_request_context = False
+
 from agent_memory import db
 from agent_memory.config import get_settings
 from agent_memory.consolidation_tools import (
@@ -38,12 +45,43 @@ from agent_memory.oversight import dispute, stats
 from agent_memory.promotion import demote, promote
 from agent_memory.retrieval import run_retrieval
 from agent_memory.secrets import screen_secrets
+from agent_memory.session_state import (
+    note_client_name,
+    resolve_namespace,
+    set_session_namespace,
+)
 from agent_memory.usage import report_usage
 
 
+async def _observe_client_info(
+    ctx: "ServerRequestContext[Any]", call_next: "CallNext"
+) -> "HandlerResult":
+    """ServerMiddleware seam (Issue #4): wraps the initialize handshake
+    before its commit, when params are still the raw wire mapping, so the
+    client's name feeds session_state's derived default namespace. The
+    annotations are quoted because the context types are 2.x-only; they
+    still resolve via typing.get_type_hints on a 2.x install."""
+    if ctx.method == "initialize":
+        info = (ctx.params or {}).get("clientInfo")
+        if isinstance(info, dict):
+            name = info.get("name")
+            if isinstance(name, str):
+                note_client_name(name)
+    return await call_next(ctx)
+
+
 def create_server() -> MCPServer:
-    """Server factory; every task's tool registers on this one app."""
-    server: MCPServer = MCPServer(name="agent-memory")
+    """Server factory; every task's tool registers on this one app.
+
+    Without the 2.x request-context machinery (an mcp 1.x install) the
+    middleware seam is skipped: no clientInfo-derived namespace, while the
+    param/session/configured tiers keep resolving unchanged."""
+    if _has_request_context:
+        server: MCPServer = MCPServer(
+            name="agent-memory", middleware=[_observe_client_info]
+        )
+    else:  # 1.x FastMCP has no middleware constructor parameter
+        server = MCPServer(name="agent-memory")
 
     @server.tool()
     def memory_capture_episode(
@@ -74,9 +112,7 @@ def create_server() -> MCPServer:
         )
         embedded_text = f"{goal} {expectation} {action} {outcome}"
         vector = load_embedder(settings).embed([embedded_text])[0]
-        effective_namespace = (
-            settings.MEMORY_NAMESPACE if namespace is None else namespace
-        )
+        effective_namespace = resolve_namespace(settings, namespace)
         clamped_surprise = max(0.0, min(surprise, 1.0))
         connection: psycopg.Connection[DictRow] = db.connect()
         try:
@@ -348,7 +384,8 @@ def create_server() -> MCPServer:
         than the probe staleness threshold — same formula, same settings),
         cross_cutting_episodes (episodes cited by two or more distinct
         lessons), and demoted_promotions (retained tombstones with reason
-        and dates). namespace is None -> MEMORY_NAMESPACE.
+        and dates). namespace is None -> the resolved default (session
+        override > env > clientInfo-derived).
         """
         return stats(get_settings(), namespace=namespace)
 
@@ -369,10 +406,30 @@ def create_server() -> MCPServer:
         (any date; same-day included), falling back to lessons carrying
         contradict edges when no valid snapshot exists. Returns
         {"path": str, "flagged": [...], "flagged_count": int} where flagged
-        lists section 1-5 entry summaries. namespace is None ->
-        MEMORY_NAMESPACE.
+        lists section 1-5 entry summaries. namespace is None -> the
+        resolved default (session override > env > clientInfo-derived).
         """
         return digest(get_settings(), namespace=namespace)
+
+    @server.tool()
+    def memory_set_namespace(namespace: str) -> dict[str, str]:
+        """Set this session's default namespace (Issue #4); returns the
+        now-effective namespace.
+
+        The override lives only in this server process (one stdio server =
+        one client session) and dies with it — no schema, no persistence.
+        Precedence for every tool's namespace resolution becomes:
+        tool param > session-set > env (MEMORY_NAMESPACE, which the
+        --namespace flag also writes) > derived default. The derived
+        default is <clientInfo name>@local when MEMORY_NAMESPACE is unset
+        (sanitized; fallback default@local), so agentic hosts can run one
+        global config and set-and-forget per session. Validation: a
+        non-empty, non-whitespace string; 'global' is rejected as a session
+        default per the promotion-only invariant (global lessons are
+        created only by memory_promote) but stays legal as an explicit
+        per-tool param and as promote's target.
+        """
+        return {"namespace": set_session_namespace(namespace)}
 
     return server
 

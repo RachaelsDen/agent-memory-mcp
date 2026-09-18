@@ -35,6 +35,7 @@ from agent_memory.retrieval_sql import (
     NEIGHBOR_SQL,
     VECTOR_SQL,
 )
+from agent_memory.session_state import resolve_namespace
 
 EXCERPT_CHARS = 140
 
@@ -76,7 +77,7 @@ def run_retrieval(
     namespace: str | None,
 ) -> dict[str, Any]:
     """Full hybrid pipeline; the kwargs mirror the two tool signatures verbatim."""
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    effective_ns = resolve_namespace(settings, namespace)
     final_k = settings.FINAL_K if k is None else k
     params = _scoring_params(settings)
     query_vector = pgvector.Vector(load_embedder(settings).embed([query_text])[0])

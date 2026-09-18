@@ -26,6 +26,7 @@ from psycopg import sql
 from psycopg.rows import DictRow
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.types import Implementation
 from testcontainers.community.postgres import PostgresContainer
 
 import agent_memory.db as agent_db
@@ -108,7 +109,13 @@ def client(
         try:
             async with stdio_client(parameters) as (read_stream, write_stream):
                 async with ClientSession(
-                    read_stream, write_stream, read_timeout_seconds=60.0
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=60.0,
+                    # Issue #4: the shared fixture session presents as the
+                    # generic "default" client so the clientInfo-derived
+                    # namespace stays default@local for every existing test.
+                    client_info=Implementation(name="default", version="0.0.0"),
                 ) as session:
                     await session.initialize()
                     yield session

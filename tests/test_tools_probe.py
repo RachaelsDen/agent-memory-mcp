@@ -33,7 +33,7 @@ import psycopg
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, Implementation, TextContent
 from psycopg.rows import DictRow
 
 from tests.conftest import backdate
@@ -95,7 +95,12 @@ def _server(
         try:
             async with stdio_client(parameters) as (read_stream, write_stream):
                 async with ClientSession(
-                    read_stream, write_stream, read_timeout_seconds=60.0
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=60.0,
+                    # Issue #4: pin the client name so this session's derived
+                    # default namespace stays default@local like conftest's.
+                    client_info=Implementation(name="default", version="0.0.0"),
                 ) as session:
                     await session.initialize()
                     yield session

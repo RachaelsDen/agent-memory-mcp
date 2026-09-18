@@ -44,6 +44,7 @@ from agent_memory import db
 from agent_memory.config import Settings
 from agent_memory.oversight import stats as oversight_stats
 from agent_memory.secrets import screen_document
+from agent_memory.session_state import resolve_namespace
 
 EXCERPT_CHARS = 140
 SNAPSHOT_TOLERANCE = 1e-6
@@ -154,8 +155,8 @@ def _section(number: int, title: str, entries: list[str]) -> list[str]:
 
 
 def digest(settings: Settings, *, namespace: str | None = None) -> dict[str, Any]:
-    """Render the six-section audit digest; None namespace -> settings.MEMORY_NAMESPACE."""
-    effective_ns = settings.MEMORY_NAMESPACE if namespace is None else namespace
+    """Render the six-section audit digest; None namespace -> resolved default."""
+    effective_ns = resolve_namespace(settings, namespace)
     root = Path(settings.DIGEST_DIR).expanduser()
     try:
         root.mkdir(parents=True, exist_ok=True)
