@@ -13,8 +13,17 @@ Two connection flavors, on purpose:
   default transaction mode the advisory-lock SELECT would silently start an
   outer transaction, demoting every ``with conn.transaction():`` below to a
   savepoint and rolling all migrations back when the connection closes.
+
+Migration 003's claim-embedding backfill runs as a PYTHON step inside
+migrate(), not as SQL (design choice, Issue #6): computing embeddings needs
+the embedder, which SQL cannot invoke. The step is gated on 003 being in the
+bookkeeping (just applied or earlier) and touches only rows whose
+claim_embedding is still NULL, so it is idempotent and a no-op on fresh
+databases. It runs while the migration advisory lock is held, so concurrent
+migrators cannot double-embed; a crashed run resumes on the next migrate().
 """
 
+import json
 from pathlib import Path
 
 import pgvector.psycopg
@@ -22,9 +31,20 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 
 from agent_memory.config import get_settings
+from agent_memory.embed import Embedder, FakeEmbedder, load_embedder
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _LOCK_KEY = "agent-memory-migrations"
+CLAIM_EMBEDDING_MIGRATION = "003_claim_embedding.sql"
+_BACKFILL_BATCH = 500
+
+_CLAIM_BACKFILL_SELECT_SQL = """
+    SELECT id, claim FROM lessons WHERE claim_embedding IS NULL ORDER BY id LIMIT %(limit)s
+"""
+
+_CLAIM_BACKFILL_UPDATE_SQL = """
+    UPDATE lessons SET claim_embedding = %(vector)s WHERE id = %(id)s
+"""
 
 
 def connect() -> psycopg.Connection[DictRow]:
@@ -46,6 +66,31 @@ def connect() -> psycopg.Connection[DictRow]:
 def connect_bootstrap() -> psycopg.Connection:
     """Migration connection: plain rows, no vector adapter, no ef_search."""
     return psycopg.connect(get_settings().DATABASE_URL, autocommit=True)
+
+
+def _backfill_claim_embeddings(conn: psycopg.Connection, dim: int) -> None:
+    """Embed `claim` for lessons still lacking a claim_embedding (003 step)."""
+    # The vector type now exists (001 applied), so the adapter is safe to
+    # register on this bootstrap connection for the UPDATE parameters.
+    pgvector.psycopg.register_vector(conn)
+    settings = get_settings()
+    if settings.EMBED_IMPL == "fake":
+        overrides = json.loads(settings.FAKE_EMBED_OVERRIDES or "{}")
+        embedder: Embedder = FakeEmbedder(dim=dim, overrides=overrides)
+    else:
+        # Production invariant: serve() passes settings.PGVECTOR_DIM, so local-embedder dims match by construction.
+        embedder = load_embedder(settings)
+
+    while True:
+        rows = conn.execute(_CLAIM_BACKFILL_SELECT_SQL, {"limit": _BACKFILL_BATCH}).fetchall()
+        if not rows:
+            break
+        vectors = embedder.embed([str(row[1]) for row in rows])
+        for row, vector in zip(rows, vectors, strict=True):
+            conn.execute(
+                _CLAIM_BACKFILL_UPDATE_SQL,
+                {"id": row[0], "vector": pgvector.Vector(vector)},
+            )
 
 
 def migrate(dim: int) -> list[str]:
@@ -85,6 +130,8 @@ def migrate(dim: int) -> list[str]:
                     "INSERT INTO agent_memory_migrations (name) VALUES (%(name)s)",
                     {"name": path.name},
                 )
+        if CLAIM_EMBEDDING_MIGRATION in applied | {path.name for path in pending}:
+            _backfill_claim_embeddings(conn, dim)
         return [path.name for path in pending]
     finally:
         # Unlock first, but ALWAYS close: an abandoned open connection still

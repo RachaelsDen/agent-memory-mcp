@@ -765,8 +765,11 @@ class TestMigrationUpgrade:
                 assert agent_db.migrate(dim=8) == ["001_init.sql"]
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
                 # every table from 001 already exists — only the bookkeeping
-                # comparison can see that 002 is pending.
-                assert agent_db.migrate(dim=8) == ["002_dispute_reason.sql"]
+                # comparison can see that 002 and 003 are pending.
+                assert agent_db.migrate(dim=8) == [
+                    "002_dispute_reason.sql",
+                    "003_claim_embedding.sql",
+                ]
                 assert agent_db.migrate(dim=8) == []
             finally:
                 if previous is None:
@@ -778,7 +781,11 @@ class TestMigrationUpgrade:
                 names = {
                     row[0] for row in conn.execute("SELECT name FROM agent_memory_migrations")
                 }
-                assert names == {"001_init.sql", "002_dispute_reason.sql"}
+                assert names == {
+                    "001_init.sql",
+                    "002_dispute_reason.sql",
+                    "003_claim_embedding.sql",
+                }
                 column = conn.execute(
                     """
                     SELECT count(*) FROM information_schema.columns
@@ -787,3 +794,94 @@ class TestMigrationUpgrade:
                 ).fetchone()
                 assert column is not None
                 assert column[0] == 1
+
+    def test_backfill_uses_migration_dim_when_settings_dim_diverges(
+        self, pg: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        real_dir = agent_db.MIGRATIONS_DIR
+        only_001_002 = tmp_path / "only001002"
+        only_001_002.mkdir()
+        shutil.copy(real_dir / "001_init.sql", only_001_002 / "001_init.sql")
+        shutil.copy(real_dir / "002_dispute_reason.sql", only_001_002 / "002_dispute_reason.sql")
+        with PostgresContainer("pgvector/pgvector:pg16") as container:
+            url = container.get_connection_url(driver=None)
+            previous_url = os.environ.get("DATABASE_URL")
+            previous_dim = os.environ.get("PGVECTOR_DIM")
+            previous_impl = os.environ.get("EMBED_IMPL")
+            os.environ["DATABASE_URL"] = url
+            os.environ["EMBED_IMPL"] = "fake"
+            os.environ["PGVECTOR_DIM"] = "384"
+            get_settings.cache_clear()
+            try:
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", only_001_002)
+                assert agent_db.migrate(dim=8) == ["001_init.sql", "002_dispute_reason.sql"]
+
+                with psycopg.connect(url, autocommit=True) as conn:
+                    conn.execute(
+                        "INSERT INTO lessons (namespace, claim, because) VALUES ('test', 'claim 1', 'because 1')"
+                    )
+
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
+                assert agent_db.migrate(dim=8) == ["003_claim_embedding.sql"]
+
+                with psycopg.connect(url, autocommit=True) as conn:
+                    row = conn.execute(
+                        "SELECT vector_dims(claim_embedding) FROM lessons WHERE claim = 'claim 1'"
+                    ).fetchone()
+                    assert row is not None
+                    assert row[0] == 8
+            finally:
+                if previous_url is None:
+                    os.environ.pop("DATABASE_URL", None)
+                else:
+                    os.environ["DATABASE_URL"] = previous_url
+                if previous_dim is None:
+                    os.environ.pop("PGVECTOR_DIM", None)
+                else:
+                    os.environ["PGVECTOR_DIM"] = previous_dim
+                if previous_impl is None:
+                    os.environ.pop("EMBED_IMPL", None)
+                else:
+                    os.environ["EMBED_IMPL"] = previous_impl
+                get_settings.cache_clear()
+
+    def test_backfill_pages_in_batches(
+        self, pg: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        real_dir = agent_db.MIGRATIONS_DIR
+        only_001_002 = tmp_path / "only001002"
+        only_001_002.mkdir()
+        shutil.copy(real_dir / "001_init.sql", only_001_002 / "001_init.sql")
+        shutil.copy(real_dir / "002_dispute_reason.sql", only_001_002 / "002_dispute_reason.sql")
+        with PostgresContainer("pgvector/pgvector:pg16") as container:
+            url = container.get_connection_url(driver=None)
+            previous_url = os.environ.get("DATABASE_URL")
+            os.environ["DATABASE_URL"] = url
+            get_settings.cache_clear()
+            try:
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", only_001_002)
+                assert agent_db.migrate(dim=8) == ["001_init.sql", "002_dispute_reason.sql"]
+
+                with psycopg.connect(url, autocommit=True) as conn:
+                    for i in range(5):
+                        conn.execute(
+                            "INSERT INTO lessons (namespace, claim, because) VALUES ('test', %(c)s, 'b')",
+                            {"c": f"claim {i}"},
+                        )
+
+                monkeypatch.setattr(agent_db, "_BACKFILL_BATCH", 2)
+                monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
+                assert agent_db.migrate(dim=8) == ["003_claim_embedding.sql"]
+
+                with psycopg.connect(url, autocommit=True) as conn:
+                    count = conn.execute(
+                        "SELECT count(*) FROM lessons WHERE claim_embedding IS NOT NULL"
+                    ).fetchone()
+                    assert count is not None
+                    assert count[0] == 5
+            finally:
+                if previous_url is None:
+                    os.environ.pop("DATABASE_URL", None)
+                else:
+                    os.environ["DATABASE_URL"] = previous_url
+                get_settings.cache_clear()

@@ -323,10 +323,13 @@ or by cron via the CLI entrypoint.
    fails_when — citing which episodes support them. Where episodes within a cluster conflict, it
    writes **two** lessons (P9) and names the contradiction.
 3. **Write:** `memory_write_lesson` stores the lesson and one `support`/`refine` evidence edge per
-   cited episode — the edges *are* the consolidation, no flag to set — computes `similar` links to
-   existing lessons (cosine > 0.75), embeds the composite `claim + because + holds_when` for the
-   duplicate-claim guard, and rejects near-duplicate lesson documents above `DUP_CLAIM_COS`
-   (episodes may be reused, lessons may not); the **server**
+   cited episode — the edges *are* the consolidation, no flag to set — and guards duplicates on
+   two thresholds: the claim alone is embedded, and a claim cosine above `DUP_CLAIM_COS` to an
+   existing lesson in the namespace is rejected as a duplicate (episodes may be reused, lessons
+   may not) unless the twin sits in the `replaces_disputed` lineage — re-derivations share their
+   claim by design, so supersession is the sanctioned verbatim path. The composite
+   `claim + because + holds_when` embedding drives retrieval and `similar` links (cosine > 0.75)
+   only: identical rationale under a different claim links, never rejects. The **server**
    seeds confidence — never the caller (P3) — via an evidence-diversity formula:
 
    ```
@@ -421,7 +424,9 @@ a false memory the compressor wrote, `memory_dispute` forces re-derivation from 
   `promotion_status='active'`. No automatic graduation exists, by design: one project producing a
   convincing-looking pattern is exactly how global memory gets contaminated. The promoted copy's
   confidence evolves *independently*, from cross-project corroboration — global trust must be earned
-  globally. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
+  globally. Promotion enforces the target namespace's claim-identity bar (a claim already graduated
+  cannot be duplicated; corroborate the existing lesson instead) and heals a missing source claim
+  embedding at copy time. **Demotion is a tombstone, never a delete**: `promotion_status='demoted'` + `demoted_at`
   + `demotion_reason`, and the record stays queryable — months later, "why did the agent trust X in
   March?" must be answerable from the data, not reconstructed from its absence. The original
   project lesson is untouched throughout.

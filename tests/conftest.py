@@ -50,6 +50,12 @@ def pg() -> Iterator[str]:
     with PostgresContainer("pgvector/pgvector:pg16") as container:
         url = container.get_connection_url(driver=None)
         os.environ["DATABASE_URL"] = url
+        # Issue #6: migrate()'s claim-embedding backfill embeds through
+        # load_embedder(get_settings()); the in-process settings must use the
+        # same fake embedder and dim as the spawned server subprocess, or the
+        # backfill would download the local model into an 8-dim column.
+        os.environ["EMBED_IMPL"] = "fake"
+        os.environ["PGVECTOR_DIM"] = "8"
         get_settings.cache_clear()  # this process must now see the container URL
         agent_db.migrate(dim=8)
         elapsed = (datetime.now(tz=timezone.utc) - started).total_seconds()

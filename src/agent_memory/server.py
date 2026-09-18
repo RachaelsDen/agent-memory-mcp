@@ -223,10 +223,12 @@ def create_server() -> MCPServer:
         "support"|"refine"|"contradict", "reason": str}; at least one
         support/refine edge is required. Confidence is seeded SERVER-side
         from incident collapse + day diversity — never caller-supplied.
-        Near-duplicate claims (cosine > DUP_CLAIM_COS to an existing lesson
-        in the namespace) are rejected unless they supersede a disputed
-        lesson via replaces_disputed, which also writes the refines link
-        that completes the predecessor's pending re-derivation. Similar
+        Claim-identical lessons (claim-only cosine > DUP_CLAIM_COS to an
+        existing lesson in the namespace) are rejected unless they supersede
+        a disputed lesson via replaces_disputed, which also writes the
+        refines link that completes the predecessor's pending
+        re-derivation; the composite claim+because+holds_when cosine
+        drives similar links only. Similar
         lessons are linked in both directions; contradicts names an
         opposing lesson (P9). namespace 'global' is rejected — global
         lessons are created only by memory_promote (DESIGN §11). Returns
@@ -304,9 +306,13 @@ def create_server() -> MCPServer:
         fails_when, the same embedding, and the source's confidence, while
         its usage stats reset to zero. All evidence edges are copied to the
         same episode ids. The original row is untouched (copy, never move);
-        promoting into the lesson's own namespace is an error. namespace is
-        accepted per the every-tool contract; the lesson_id alone scopes the
-        source. Returns {"promoted_lesson_id": int}.
+        promoting into the lesson's own namespace is an error. Promotion
+        enforces the target namespace's claim-identity bar — a claim
+        already graduated into the target is rejected (corroborate the
+        existing lesson instead) — and heals a source whose claim embedding
+        is missing at copy time. namespace is accepted per the every-tool
+        contract; the lesson_id alone scopes the source. Returns
+        {"promoted_lesson_id": int}.
         """
         return promote(
             lesson_id=lesson_id,
