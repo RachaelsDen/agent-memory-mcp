@@ -765,10 +765,11 @@ class TestMigrationUpgrade:
                 assert agent_db.migrate(dim=8) == ["001_init.sql"]
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
                 # every table from 001 already exists — only the bookkeeping
-                # comparison can see that 002 and 003 are pending.
+                # comparison can see that 002, 003, and 004 are pending.
                 assert agent_db.migrate(dim=8) == [
                     "002_dispute_reason.sql",
                     "003_claim_embedding.sql",
+                    "004_lessons_namespace_index.sql",
                 ]
                 assert agent_db.migrate(dim=8) == []
             finally:
@@ -785,6 +786,7 @@ class TestMigrationUpgrade:
                     "001_init.sql",
                     "002_dispute_reason.sql",
                     "003_claim_embedding.sql",
+                    "004_lessons_namespace_index.sql",
                 }
                 column = conn.execute(
                     """
@@ -794,6 +796,17 @@ class TestMigrationUpgrade:
                 ).fetchone()
                 assert column is not None
                 assert column[0] == 1
+                # 004: the general lessons(namespace) index (001's only one is
+                # partial — promoted copies only).
+                index = conn.execute(
+                    """
+                    SELECT count(*) FROM pg_indexes
+                    WHERE tablename = 'lessons'
+                      AND indexname = 'idx_lessons_namespace'
+                    """
+                ).fetchone()
+                assert index is not None
+                assert index[0] == 1
 
     def test_backfill_uses_migration_dim_when_settings_dim_diverges(
         self, pg: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -822,7 +835,10 @@ class TestMigrationUpgrade:
                     )
 
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
-                assert agent_db.migrate(dim=8) == ["003_claim_embedding.sql"]
+                assert agent_db.migrate(dim=8) == [
+                    "003_claim_embedding.sql",
+                    "004_lessons_namespace_index.sql",
+                ]
 
                 with psycopg.connect(url, autocommit=True) as conn:
                     row = conn.execute(
@@ -871,7 +887,10 @@ class TestMigrationUpgrade:
 
                 monkeypatch.setattr(agent_db, "_BACKFILL_BATCH", 2)
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
-                assert agent_db.migrate(dim=8) == ["003_claim_embedding.sql"]
+                assert agent_db.migrate(dim=8) == [
+                    "003_claim_embedding.sql",
+                    "004_lessons_namespace_index.sql",
+                ]
 
                 with psycopg.connect(url, autocommit=True) as conn:
                     count = conn.execute(

@@ -2441,7 +2441,10 @@ class TestClaimEmbeddingMigrationBackfill:
                 assert legacy is not None
 
                 monkeypatch.setattr(agent_db, "MIGRATIONS_DIR", real_dir)
-                assert agent_db.migrate(dim=DIM) == ["003_claim_embedding.sql"]
+                assert agent_db.migrate(dim=DIM) == [
+                    "003_claim_embedding.sql",
+                    "004_lessons_namespace_index.sql",
+                ]
                 assert agent_db.migrate(dim=DIM) == []  # idempotent no-op
             finally:
                 if previous is None:

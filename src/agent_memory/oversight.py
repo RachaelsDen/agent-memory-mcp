@@ -46,6 +46,16 @@ from agent_memory.session_state import resolve_namespace
 POPULAR_SHAKY_CONF = 0.3
 POPULAR_SHAKY_ACCESS = 5
 
+ALL_NAMESPACES_SQL = """
+    SELECT DISTINCT namespace FROM episodes
+    UNION
+    SELECT DISTINCT namespace FROM lessons
+    UNION
+    SELECT 'global'
+        WHERE EXISTS (SELECT 1 FROM episodes) OR EXISTS (SELECT 1 FROM lessons)
+    ORDER BY 1
+"""
+
 DISPUTE_SQL = """
     UPDATE lessons
     SET disputed = TRUE, dispute_reason = %(reason)s, updated_at = now()
@@ -104,6 +114,24 @@ DEMOTED_PROMOTIONS_SQL = """
       AND (c.namespace = %(ns)s OR s.namespace = %(ns)s)
     ORDER BY c.id
 """
+
+
+def all_namespaces() -> list[str]:
+    """Every namespace holding episodes or lessons, plus the literal 'global'
+    whenever any memory exists at all, sorted.
+
+    'global' never depends on holding rows of its own — it enumerates even
+    while momentarily empty so its audit history keeps digesting — while a
+    database with no episodes and no lessons anywhere enumerates zero
+    namespaces: a fresh install's cron renders no files, not an empty global
+    one.
+    """
+    connection: psycopg.Connection[DictRow] = db.connect()
+    try:
+        rows = connection.execute(ALL_NAMESPACES_SQL).fetchall()
+    finally:
+        connection.close()
+    return [str(row["namespace"]) for row in rows]
 
 
 def dispute(*, lesson_id: int, reason: str) -> dict[str, Any]:
