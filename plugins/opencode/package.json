@@ -1,0 +1,19 @@
+{
+  "name": "agent-memory-opencode-plugin",
+  "version": "1.1.0",
+  "type": "module",
+  "description": "OpenCode plugin injecting agent-memory discipline and a cwd-resolved namespace into the system prompt",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.10",
+    "typescript": "^5.3.0"
+  }
+}

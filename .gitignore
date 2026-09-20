@@ -39,3 +39,7 @@ Thumbs.db
 # Project-local
 .omo/
 .agent-memory/
+
+# opencode plugin (plugins/opencode) build artifacts; bun.lock stays tracked
+plugins/opencode/node_modules/
+plugins/opencode/dist/
