@@ -133,6 +133,16 @@ agent-memory
 With no arguments the process serves MCP over stdio; tool errors come back as
 MCP error results, never process exits.
 
+### Plugin
+
+For opencode hosts, [`plugins/opencode/`](plugins/opencode/) ships an injection plugin that
+appends the memory discipline block to the system prompt and instructs the agent to call
+`memory_set_namespace` with a namespace resolved from the working directory —
+`opencode@<project-directory-name>-<hash>` (matching DESIGN.md's path-hash suggestion), so every project gets its own scope with zero per-project
+config. Build it (`cd plugins/opencode && bun install && bun run build`) and point your
+`opencode.json` `plugin` list at the dist module; see
+[plugins/opencode/README.md](plugins/opencode/README.md).
+
 ## Namespaces
 
 Memory starts with a zero-config agent namespace derived from the MCP client's `clientInfo` name,
