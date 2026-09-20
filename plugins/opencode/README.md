@@ -50,7 +50,7 @@ Add the built module to the `plugin` list in your `opencode.json` (repository ro
 ```json
 {
   "plugin": [
-    "/absolute/path/to/agent-memory/plugins/opencode/dist/index.js"
+    "file:///absolute/path/to/agent-memory/plugins/opencode/dist/index.js"
   ]
 }
 ```
