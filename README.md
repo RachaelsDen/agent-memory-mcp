@@ -8,7 +8,7 @@ demotion, and a markdown digest audit layer. 14 MCP tools over stdio, backed
 by Postgres + pgvector. The full design, rationale, and scope lines live in
 [DESIGN.md](DESIGN.md).
 
-The installed tool is pinned at install time — pull/rebuild doesn't update it; upgrade via `uv tool install --force` at the new tag.
+The installed tool is pinned at install time — pull/rebuild doesn't update it; upgrade via `uv tool install --force .` at the new tag.
 
 ## The 14 tools
 
@@ -137,6 +137,16 @@ MCP error results, never process exits.
 
 For your agent to actually USE the memory tools, add the discipline block from [examples/AGENTS-memory.md](examples/AGENTS-memory.md) to your agent's instruction file (AGENTS.md, CLAUDE.md, .cursorrules, or system prompt). Without it, the tools are available but the agent may not think to use them.
 
+### Plugin
+
+For opencode hosts, [`plugins/opencode/`](plugins/opencode/) ships an injection plugin that
+appends the memory discipline block to the system prompt and instructs the agent to call
+`memory_set_namespace` with a namespace resolved from the working directory —
+`opencode@<project-directory-name>-<hash>` (matching DESIGN.md's path-hash suggestion), so every project gets its own scope with zero per-project
+config. Build it (`cd plugins/opencode && bun install && bun run build`) and point your
+`opencode.json` `plugin` list at the dist module; see
+[plugins/opencode/README.md](plugins/opencode/README.md).
+
 ## Namespaces
 
 Memory starts with a zero-config agent namespace derived from the MCP client's `clientInfo` name,
@@ -205,6 +215,8 @@ calls corrupt sequences like `\\t`, the escaped form of a literal backslash
 before a `t`).
 
 ## Cron
+
+Create the log directory once: `mkdir -p ~/.agent-memory`
 
 Digest weekly, scan daily (the scan is read-only; redirecting to /dev/null
 keeps it a pure health pass over the DB):
