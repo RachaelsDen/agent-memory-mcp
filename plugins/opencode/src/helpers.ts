@@ -48,6 +48,10 @@ export function resolveNamespace(cwd: string = process.cwd()): string {
   return `opencode@${scope || "local"}-${hash}`;
 }
 
+export function buildDiscipline(): string {
+  return MEMORY_DISCIPLINE;
+}
+
 export function buildNamespaceDirective(namespace: string): string {
   return `Your memory namespace is \`${namespace}\`.
 Call \`memory_set_namespace("${namespace}")\` now, before any other work.`;
@@ -55,9 +59,7 @@ Call \`memory_set_namespace("${namespace}")\` now, before any other work.`;
 
 export function buildInjection(namespace?: string): string {
   if (!namespace) {
-    return MEMORY_DISCIPLINE;
+    return buildDiscipline();
   }
-  return `${MEMORY_DISCIPLINE}
-${buildNamespaceDirective(namespace)}
-`;
+  return `${buildDiscipline()}\n${buildNamespaceDirective(namespace)}`;
 }

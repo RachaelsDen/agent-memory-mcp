@@ -1,6 +1,7 @@
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import {
   MARKER,
+  buildDiscipline,
   buildInjection,
   buildNamespaceDirective,
   resolveNamespace,
@@ -49,25 +50,22 @@ const plugin = ((
           (entry ?? "").includes(MARKER) ||
           (entry ?? "").includes("<!-- agent-memory -->")
       );
+      const hasNamespace = system.some((entry) =>
+        (entry ?? "").includes("memory_set_namespace")
+      );
+
+      if (!hasDiscipline) {
+        system.push(buildDiscipline());
+      }
 
       const ns =
         disableNamespace || process.env.MEMORY_NAMESPACE
           ? undefined
           : resolveNamespace(input.directory ?? process.cwd());
 
-      if (hasDiscipline) {
-        if (ns) {
-          const hasNamespace = system.some((entry) =>
-            (entry ?? "").includes("memory_set_namespace")
-          );
-          if (!hasNamespace) {
-            system.push(buildNamespaceDirective(ns));
-          }
-        }
-        return;
+      if (ns !== undefined && !hasNamespace) {
+        system.push(buildNamespaceDirective(ns));
       }
-
-      system.push(buildInjection(ns));
     },
   };
 

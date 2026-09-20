@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { PluginInput } from "@opencode-ai/plugin";
 
 import plugin from "./index";
-import { MARKER, buildInjection, resolveNamespace } from "./helpers";
+import {
+  MARKER,
+  buildDiscipline,
+  buildInjection,
+  buildNamespaceDirective,
+  resolveNamespace,
+} from "./helpers";
 
 function makePluginInput(): PluginInput {
   return {
@@ -149,20 +155,21 @@ describe("buildInjection", () => {
 });
 
 describe("experimental.chat.system.transform", () => {
-  test("appends the injection once to an existing system prompt", async () => {
+  test("appends discipline block and namespace directive to an existing system prompt", async () => {
     const transform = await getTransform();
     const out: { system?: string[] } = { system: ["base prompt"] };
 
     await transform({ model: "unknown" }, out);
 
-    expect(out.system?.length).toBe(2);
+    expect(out.system?.length).toBe(3);
     expect(out.system?.[0]).toBe("base prompt");
-    expect(out.system?.[1]).toBe(buildInjection(resolveNamespace()));
+    expect(out.system?.[1]).toBe(buildDiscipline());
+    expect(out.system?.[2]).toBe(buildNamespaceDirective(resolveNamespace()));
   });
 
-  test("is a no-op when the marker is already present", async () => {
+  test("is a no-op when marker and custom namespace directive are already present", async () => {
     const transform = await getTransform();
-    const existing = buildInjection("opencode@already-injected");
+    const existing = buildInjection("agent@custom-thing");
     const out: { system?: string[] } = { system: ["base prompt", existing] };
 
     await transform({ model: "unknown" }, out);
@@ -199,6 +206,32 @@ describe("experimental.chat.system.transform", () => {
     expect(out.system?.[1]).toBe(nsDirective);
   });
 
+  test("injects namespace directive when marker is present but namespace directive is missing", async () => {
+    const transform = await getTransform();
+    const disciplineOnly = buildDiscipline();
+    const out: { system?: string[] } = { system: ["base prompt", disciplineOnly] };
+
+    await transform({ model: "unknown" }, out);
+
+    expect(out.system?.length).toBe(3);
+    expect(out.system?.[0]).toBe("base prompt");
+    expect(out.system?.[1]).toBe(disciplineOnly);
+    expect(out.system?.[2]).toBe(buildNamespaceDirective(resolveNamespace()));
+  });
+
+  test("recognizes generic memory_set_namespace( with any non-opencode namespace", async () => {
+    const transform = await getTransform();
+    const customNsDirective = 'Please call `memory_set_namespace("custom_ns@project")` at start.';
+    const out: { system?: string[] } = { system: ["base prompt", customNsDirective] };
+
+    await transform({ model: "unknown" }, out);
+
+    expect(out.system?.length).toBe(3);
+    expect(out.system?.[0]).toBe("base prompt");
+    expect(out.system?.[1]).toBe(customNsDirective);
+    expect(out.system?.[2]).toBe(buildDiscipline());
+  });
+
   test("creates the system array when it is missing", async () => {
     const transform = await getTransform();
     const out: { system?: string[] } = {};
@@ -206,8 +239,9 @@ describe("experimental.chat.system.transform", () => {
     await transform({ model: "unknown" }, out);
 
     expect(Array.isArray(out.system)).toBe(true);
-    expect(out.system?.length).toBe(1);
-    expect(out.system?.[0]).toContain(MARKER);
+    expect(out.system?.length).toBe(2);
+    expect(out.system?.[0]).toBe(buildDiscipline());
+    expect(out.system?.[1]).toBe(buildNamespaceDirective(resolveNamespace()));
   });
 
   test("omits set_namespace directive when MEMORY_NAMESPACE is set in process.env", async () => {
