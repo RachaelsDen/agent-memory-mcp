@@ -12,7 +12,7 @@ the system prompt:
 1. **Memory discipline** — the recall / capture / report / consolidate rules for the agent-memory
    tools (`memory_probe`, `memory_capture_episode`, `memory_report_usage`,
    `memory_consolidate_scan` → `memory_write_lesson`). The block starts with the `[agent-memory]`
-   marker and injection is idempotent, so it is never duplicated.
+   marker and injection is idempotent, so it is never duplicated. The plugin recognizes both the `[agent-memory]` marker and the `<!-- agent-memory -->` HTML comment from the paste-in block.
 2. **Namespace directive** — instructs the agent to call
    `memory_set_namespace("opencode@<project>-<hash>")` now, before any other work (omitted if
    `MEMORY_NAMESPACE` is set in the environment).

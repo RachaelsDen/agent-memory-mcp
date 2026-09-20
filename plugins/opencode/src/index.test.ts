@@ -171,6 +171,34 @@ describe("experimental.chat.system.transform", () => {
     expect(out.system?.[1]).toBe(existing);
   });
 
+  test("does not append discipline block when <!-- agent-memory --> is present, but injects namespace directive if absent", async () => {
+    const transform = await getTransform();
+    const pasteInBlock = "<!-- agent-memory -->\n## Memory Discipline\n...";
+    const out: { system?: string[] } = { system: [pasteInBlock] };
+
+    await transform({ model: "unknown" }, out);
+
+    expect(out.system?.length).toBe(2);
+    expect(out.system?.[0]).toBe(pasteInBlock);
+    expect(out.system?.[1]).not.toContain(MARKER);
+    expect(out.system?.[1]).not.toContain("## Memory Discipline");
+    expect(out.system?.[1]).toContain("Your memory namespace is");
+    expect(out.system?.[1]).toContain("memory_set_namespace");
+  });
+
+  test("is a no-op when <!-- agent-memory --> and namespace directive are already present", async () => {
+    const transform = await getTransform();
+    const pasteInBlock = "<!-- agent-memory -->\n## Memory Discipline\n...";
+    const nsDirective = 'Your memory namespace is `opencode@test`.\nCall `memory_set_namespace("opencode@test")` now.';
+    const out: { system?: string[] } = { system: [pasteInBlock, nsDirective] };
+
+    await transform({ model: "unknown" }, out);
+
+    expect(out.system?.length).toBe(2);
+    expect(out.system?.[0]).toBe(pasteInBlock);
+    expect(out.system?.[1]).toBe(nsDirective);
+  });
+
   test("creates the system array when it is missing", async () => {
     const transform = await getTransform();
     const out: { system?: string[] } = {};
